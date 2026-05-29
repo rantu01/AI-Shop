@@ -102,11 +102,22 @@ const WhatsAppSessionSchema = new Schema<IWhatsAppSessionDoc>({
   phoneNumber: { type: String, default: "" }
 }, { timestamps: true });
 
+export interface IWhatsAppAuthStateDoc extends Document {
+  sessionId: string;
+  files: Record<string, string>;
+}
+
+const WhatsAppAuthStateSchema = new Schema<IWhatsAppAuthStateDoc>({
+  sessionId: { type: String, required: true, unique: true, index: true },
+  files: { type: Schema.Types.Mixed, required: true, default: {} }
+}, { timestamps: true });
+
 export let CategoryModel: mongoose.Model<ICategoryDoc>;
 export let ProductModel: mongoose.Model<IProductDoc>;
 export let OrderModel: mongoose.Model<IOrderDoc>;
 export let UserProfileModel: mongoose.Model<IUserProfileDoc>;
 export let WhatsAppSessionModel: mongoose.Model<IWhatsAppSessionDoc>;
+export let WhatsAppAuthStateModel: mongoose.Model<IWhatsAppAuthStateDoc>;
 
 
 let isMongoConnected = false;
@@ -117,6 +128,7 @@ let inMemoryProducts: Product[] = [...initialProducts];
 let inMemoryOrders: Order[] = [];
 let inMemoryProfiles: UserProfile[] = [];
 let inMemoryWhatsAppSession: any = { connected: false, status: 'disconnected', qrCode: '', phoneNumber: '' };
+let inMemoryWhatsAppAuthState: Record<string, Record<string, string>> = {};
 
 export async function connectDB() {
   const uri = process.env.MONGODB_URI;
@@ -140,6 +152,7 @@ export async function connectDB() {
     OrderModel = mongoose.models.Order || mongoose.model<IOrderDoc>('Order', OrderSchema);
     UserProfileModel = mongoose.models.UserProfile || mongoose.model<IUserProfileDoc>('UserProfile', UserProfileSchema);
     WhatsAppSessionModel = mongoose.models.WhatsAppSession || mongoose.model<IWhatsAppSessionDoc>('WhatsAppSession', WhatsAppSessionSchema);
+    WhatsAppAuthStateModel = mongoose.models.WhatsAppAuthState || mongoose.model<IWhatsAppAuthStateDoc>('WhatsAppAuthState', WhatsAppAuthStateSchema);
 
     // Try dropping stale unique indexes if they exist to prevent constraint violations
     try {
@@ -606,5 +619,56 @@ export const dbAPI = {
 
     inMemoryWhatsAppSession = cleanData;
     return cleanData;
+  },
+
+  async getWhatsAppAuthState(sessionId: string): Promise<Record<string, string> | null> {
+    if (isMongoConnected && WhatsAppAuthStateModel) {
+      try {
+        const doc = await WhatsAppAuthStateModel.findOne({ sessionId });
+        if (doc?.files && typeof doc.files === 'object') {
+          return doc.files as Record<string, string>;
+        }
+      } catch (err) {
+        console.error("MongoDB getWhatsAppAuthState error:", err);
+      }
+    }
+
+    return inMemoryWhatsAppAuthState[sessionId] || null;
+  },
+
+  async updateWhatsAppAuthState(sessionId: string, files: Record<string, string>): Promise<Record<string, string>> {
+    const cleanFiles = Object.fromEntries(
+      Object.entries(files || {}).filter(([, content]) => typeof content === 'string')
+    );
+
+    if (isMongoConnected && WhatsAppAuthStateModel) {
+      try {
+        const doc = await WhatsAppAuthStateModel.findOneAndUpdate(
+          { sessionId },
+          { sessionId, files: cleanFiles },
+          { new: true, upsert: true }
+        );
+
+        return (doc?.files as Record<string, string>) || cleanFiles;
+      } catch (err) {
+        console.error("MongoDB updateWhatsAppAuthState error:", err);
+      }
+    }
+
+    inMemoryWhatsAppAuthState[sessionId] = cleanFiles;
+    return cleanFiles;
+  },
+
+  async clearWhatsAppAuthState(sessionId: string): Promise<void> {
+    if (isMongoConnected && WhatsAppAuthStateModel) {
+      try {
+        await WhatsAppAuthStateModel.deleteOne({ sessionId });
+        return;
+      } catch (err) {
+        console.error("MongoDB clearWhatsAppAuthState error:", err);
+      }
+    }
+
+    delete inMemoryWhatsAppAuthState[sessionId];
   }
 };

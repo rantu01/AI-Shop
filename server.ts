@@ -44,9 +44,74 @@ let whatsappLogs: WhatsAppLog[] = [
 
 let whatsappSocket: any = null;
 let whatsappBootstrapPromise: Promise<void> | null = null;
+let whatsappAuthSyncTimer: NodeJS.Timeout | null = null;
 
 async function ensureWhatsAppAuthDir() {
   await fs.mkdir(whatsappAuthDir, { recursive: true });
+}
+
+async function clearWhatsAppAuthDir() {
+  const entries = await fs.readdir(whatsappAuthDir, { withFileTypes: true }).catch(() => [] as any[]);
+  await Promise.all(
+    entries
+      .filter((entry: any) => entry.isFile?.() ?? false)
+      .map((entry: any) => fs.unlink(path.join(whatsappAuthDir, entry.name)).catch(() => undefined))
+  );
+}
+
+async function hydrateWhatsAppAuthDirFromMongo() {
+  const storedFiles = await dbAPI.getWhatsAppAuthState("default");
+  if (!storedFiles || Object.keys(storedFiles).length === 0) {
+    return false;
+  }
+
+  await ensureWhatsAppAuthDir();
+  await clearWhatsAppAuthDir();
+
+  await Promise.all(
+    Object.entries(storedFiles).map(([fileName, content]) =>
+      fs.writeFile(path.join(whatsappAuthDir, fileName), content, "utf-8")
+    )
+  );
+
+  return true;
+}
+
+async function persistWhatsAppAuthDirToMongo() {
+  await ensureWhatsAppAuthDir();
+
+  const entries = await fs.readdir(whatsappAuthDir, { withFileTypes: true }).catch(() => [] as any[]);
+  const files: Record<string, string> = {};
+
+  for (const entry of entries as any[]) {
+    if (!entry.isFile?.() || !entry.name.endsWith(".json")) {
+      continue;
+    }
+
+    try {
+      files[entry.name] = await fs.readFile(path.join(whatsappAuthDir, entry.name), "utf-8");
+    } catch (readError) {
+      console.warn(`Skipping WhatsApp auth file ${entry.name} during Mongo sync:`, readError);
+    }
+  }
+
+  if (Object.keys(files).length > 0) {
+    await dbAPI.updateWhatsAppAuthState("default", files);
+  }
+}
+
+function startWhatsAppAuthSyncLoop() {
+  if (whatsappAuthSyncTimer) {
+    return;
+  }
+
+  whatsappAuthSyncTimer = setInterval(() => {
+    void persistWhatsAppAuthDirToMongo().catch((error) => {
+      console.error("WhatsApp auth sync loop failure:", error);
+    });
+  }, 15000);
+
+  whatsappAuthSyncTimer.unref?.();
 }
 
 function extractWhatsAppText(message: any) {
@@ -82,9 +147,11 @@ async function startWhatsAppBridge() {
   whatsappBootstrapPromise = (async () => {
     try {
       await ensureWhatsAppAuthDir();
+      await hydrateWhatsAppAuthDirFromMongo();
 
       const logger = P({ level: "silent" });
       const { state, saveCreds } = await useMultiFileAuthState(whatsappAuthDir);
+      startWhatsAppAuthSyncLoop();
 
       let version: [number, number, number] = [2, 3000, 1015901307];
       try {
@@ -107,7 +174,12 @@ async function startWhatsAppBridge() {
         browser: ["Shera Sawda", "Chrome", "1.0.0"]
       });
 
-      whatsappSocket.ev.on("creds.update", saveCreds);
+      whatsappSocket.ev.on("creds.update", async (...args: any[]) => {
+        await saveCreds(...args);
+        void persistWhatsAppAuthDirToMongo().catch((error) => {
+          console.error("WhatsApp auth persistence failure after creds update:", error);
+        });
+      });
 
       whatsappSocket.ev.on("messages.upsert", async (event: any) => {
         try {
@@ -193,6 +265,9 @@ async function startWhatsAppBridge() {
               qrCode: qrDataUrl,
               phoneNumber: ""
             });
+            void persistWhatsAppAuthDirToMongo().catch((error) => {
+              console.error("WhatsApp auth persistence failure after QR generation:", error);
+            });
 
             whatsappLogs.push({
               id: `log-${Date.now()}-qr`,
@@ -220,6 +295,9 @@ async function startWhatsAppBridge() {
             qrCode: "",
             phoneNumber
           });
+          void persistWhatsAppAuthDirToMongo().catch((error) => {
+            console.error("WhatsApp auth persistence failure after connection open:", error);
+          });
 
           whatsappLogs.push({
             id: `log-${Date.now()}-open`,
@@ -240,6 +318,15 @@ async function startWhatsAppBridge() {
             qrCode: "",
             phoneNumber: ""
           });
+
+          if (loggedOut) {
+            await dbAPI.clearWhatsAppAuthState("default");
+            await clearWhatsAppAuthDir();
+          } else {
+            void persistWhatsAppAuthDirToMongo().catch((error) => {
+              console.error("WhatsApp auth persistence failure after close:", error);
+            });
+          }
 
           whatsappLogs.push({
             id: `log-${Date.now()}-close`,
@@ -266,6 +353,9 @@ async function startWhatsAppBridge() {
         status: "disconnected",
         qrCode: "",
         phoneNumber: ""
+      });
+      void persistWhatsAppAuthDirToMongo().catch((syncError) => {
+        console.error("WhatsApp auth persistence failure after bootstrap error:", syncError);
       });
 
       whatsappLogs.push({
