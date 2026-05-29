@@ -19,6 +19,8 @@ interface BotResult {
   productFound?: boolean;
 }
 
+const DEFAULT_WEBSITE_URL = "https://ai-shop.rantumondal.codes/";
+
 /**
  * Main E-commerce Gemini conversational AI broker.
  * Leverages the database state to answer user product queries accurately.
@@ -29,7 +31,7 @@ interface BotResult {
  * 3. Formulate the prompt with detailed product availability context.
  * 4. Ground Gemini's response so it acts as an "E-commerce Sales Assistant".
  */
-export async function getBotResponse(incomingText: string, websiteUrl: string = "https://example.com"): Promise<BotResult> {
+export async function getBotResponse(incomingText: string, websiteUrl: string = DEFAULT_WEBSITE_URL): Promise<BotResult> {
   const products = await dbAPI.getProducts();
   const cleanedText = incomingText.trim().toUpperCase();
 

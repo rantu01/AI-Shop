@@ -11,6 +11,8 @@ import Stripe from "stripe";
 import QRCode from "qrcode";
 import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, useMultiFileAuthState } from "@whiskeysockets/baileys";
 
+const DEFAULT_APP_URL = "https://ai-shop.rantumondal.codes/";
+
 // Configure Cloudinary
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dyhhdl1hy",
@@ -108,7 +110,7 @@ async function startWhatsAppBridge() {
         }
 
         const customerNumber = remoteJid.split("@")[0];
-        const hostHeader = process.env.APP_URL || "http://localhost:3000";
+        const hostHeader = process.env.APP_URL || DEFAULT_APP_URL;
 
         const incomingLog: WhatsAppLog = {
           id: `msg-in-${Date.now()}`,
@@ -657,8 +659,8 @@ async function startServer() {
     }
 
     try {
-      const hostHeader = req.headers.host || "localhost:3000";
-      const appUrl = process.env.APP_URL || `http://${hostHeader}`;
+      const hostHeader = req.headers.host || DEFAULT_APP_URL;
+      const appUrl = process.env.APP_URL || (hostHeader.startsWith("http") ? hostHeader : `https://${hostHeader}`);
 
       const incomingLog: WhatsAppLog = {
         id: `msg-in-${Date.now()}`,
