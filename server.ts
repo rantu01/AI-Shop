@@ -10,7 +10,10 @@ import { WhatsAppLog, WhatsAppSession } from "./src/types";
 import { v2 as cloudinary } from "cloudinary";
 import Stripe from "stripe";
 import QRCode from "qrcode";
-import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, useMultiFileAuthState } from "@whiskeysockets/baileys";
+import * as Baileys from "@whiskeysockets/baileys";
+
+const makeWASocket = ((Baileys as any).default ?? (Baileys as any).makeWASocket) as any;
+const { DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, useMultiFileAuthState } = Baileys as any;
 
 const DEFAULT_APP_URL = "https://ai-shop.rantumondal.codes/";
 
