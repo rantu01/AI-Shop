@@ -428,6 +428,107 @@ async function startServer() {
     }
   });
 
+  // SMS ingestion endpoint for mobile SMS forwarder apps
+  function parsePaymentSms(message: string) {
+    const amountMatch = message.match(/Received\s+Tk\s*([\d,]+(?:\.\d{1,2})?)/i);
+    const senderMatch = message.match(/\bfrom\s+([+\d][\d\s()-]{5,})/i);
+    const trxIdMatch = message.match(/\bTrxID\s+([A-Za-z0-9_-]+)/i);
+    const dateTimeMatch = message.match(/\bat\s+(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/i);
+
+    const amount = amountMatch ? Number(amountMatch[1].replace(/,/g, "")) : 0;
+    const sender = senderMatch ? senderMatch[1].replace(/\s+/g, "").trim() : "unknown";
+    const trxId = trxIdMatch ? trxIdMatch[1].trim().toUpperCase() : "";
+    const dateTime = dateTimeMatch ? dateTimeMatch[1].trim() : new Date().toISOString();
+
+    return { amount, sender, trxId, dateTime };
+  }
+
+  const saveSmsHandler = async (req: express.Request, res: express.Response) => {
+    try {
+      const body = req.body || {};
+      const message = String(body.message || body.text || body.sms || body.body || "").trim();
+
+      if (!message) {
+        return res.status(400).json({ error: "SMS message is required." });
+      }
+
+      const parsed = parsePaymentSms(message);
+      if (!parsed.trxId) {
+        return res.status(400).json({ error: "TrxID not found in SMS message." });
+      }
+
+      if (!parsed.amount) {
+        return res.status(400).json({ error: "Amount not found in SMS message." });
+      }
+
+      const saved = await dbAPI.createSmsMessage({
+        amount: parsed.amount,
+        sender: parsed.sender,
+        trxId: parsed.trxId,
+        dateTime: parsed.dateTime,
+        status: 'Unused',
+        message,
+        payload: body
+      });
+
+      res.status(201).json({ success: true, data: saved });
+    } catch (error: any) {
+      if (error?.code === 11000) {
+        return res.status(409).json({ error: "Duplicate TrxID. This SMS was already saved." });
+      }
+      console.error("SMS ingestion failure:", error);
+      res.status(500).json({ error: error.message || "Failed to save SMS message" });
+    }
+  };
+
+  app.post("/sms", saveSmsHandler);
+  app.post("/api/sms", saveSmsHandler);
+
+  app.get("/sms", async (req, res) => {
+    try {
+      const limit = Number(req.query.limit || 50);
+      const items = await dbAPI.getSmsMessages(limit);
+      res.json(items);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to fetch SMS messages" });
+    }
+  });
+
+  app.get("/api/sms", async (req, res) => {
+    try {
+      const limit = Number(req.query.limit || 50);
+      const items = await dbAPI.getSmsMessages(limit);
+      res.json(items);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to fetch SMS messages" });
+    }
+  });
+
+  app.post("/validate-trx", async (req, res) => {
+    try {
+      const trxId = String(req.body?.trxId || req.body?.TrxID || req.query?.trxId || "").trim();
+
+      if (!trxId) {
+        return res.status(400).json({ valid: false, used: false, message: "TrxID is required." });
+      }
+
+      const result = await dbAPI.validateAndUseTrxId(trxId);
+
+      if (!result.valid) {
+        return res.status(404).json(result);
+      }
+
+      if (!result.used) {
+        return res.status(409).json(result);
+      }
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("TrxID validation failure:", error);
+      res.status(500).json({ valid: false, used: false, message: error.message || "Failed to validate TrxID" });
+    }
+  });
+
   // Stripe Payment Checkout integration
   app.post("/api/payment/stripe", async (req, res) => {
     try {

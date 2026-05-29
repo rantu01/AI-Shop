@@ -37,6 +37,16 @@ export interface IOrderDoc extends Document {
   status: string;
 }
 
+export interface ISmsDoc extends Document {
+  amount: number;
+  sender: string;
+  trxId: string;
+  dateTime: string;
+  status: 'Unused' | 'Used';
+  message: string;
+  payload: any;
+}
+
 const CategorySchema = new Schema<ICategoryDoc>({
   name: { type: String, required: true },
   slug: { type: String, required: true, unique: true },
@@ -69,6 +79,18 @@ const OrderSchema = new Schema<IOrderDoc>({
   stripePaymentIntentId: { type: String, default: "" },
   status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' }
 }, { timestamps: true });
+
+const SmsSchema = new Schema<ISmsDoc>({
+  amount: { type: Number, required: true, index: true },
+  sender: { type: String, required: true, index: true },
+  trxId: { type: String, required: true, unique: true, sparse: true, index: true },
+  dateTime: { type: String, required: true, index: true },
+  status: { type: String, required: true, enum: ['Unused', 'Used'], default: 'Unused', index: true },
+  message: { type: String, required: true },
+  payload: { type: Schema.Types.Mixed, required: true, default: {} }
+}, { timestamps: true, collection: "sms" });
+
+SmsSchema.index({ trxId: 1 }, { unique: true, sparse: true });
 
 export interface IUserProfileDoc extends Document {
   email: string;
@@ -116,6 +138,7 @@ export let CategoryModel: mongoose.Model<ICategoryDoc>;
 export let ProductModel: mongoose.Model<IProductDoc>;
 export let OrderModel: mongoose.Model<IOrderDoc>;
 export let UserProfileModel: mongoose.Model<IUserProfileDoc>;
+export let SmsModel: mongoose.Model<ISmsDoc>;
 export let WhatsAppSessionModel: mongoose.Model<IWhatsAppSessionDoc>;
 export let WhatsAppAuthStateModel: mongoose.Model<IWhatsAppAuthStateDoc>;
 
@@ -127,6 +150,7 @@ let inMemoryCategories: Category[] = [...initialCategories];
 let inMemoryProducts: Product[] = [...initialProducts];
 let inMemoryOrders: Order[] = [];
 let inMemoryProfiles: UserProfile[] = [];
+let inMemorySmsMessages: Array<{ _id: string; amount: number; sender: string; trxId: string; dateTime: string; status: 'Unused' | 'Used'; message: string; payload: any; createdAt: string }> = [];
 let inMemoryWhatsAppSession: any = { connected: false, status: 'disconnected', qrCode: '', phoneNumber: '' };
 let inMemoryWhatsAppAuthState: Record<string, Record<string, string>> = {};
 
@@ -151,8 +175,11 @@ export async function connectDB() {
     ProductModel = mongoose.models.Product || mongoose.model<IProductDoc>('Product', ProductSchema);
     OrderModel = mongoose.models.Order || mongoose.model<IOrderDoc>('Order', OrderSchema);
     UserProfileModel = mongoose.models.UserProfile || mongoose.model<IUserProfileDoc>('UserProfile', UserProfileSchema);
+    SmsModel = mongoose.models.Sms || mongoose.model<ISmsDoc>('Sms', SmsSchema, 'sms');
     WhatsAppSessionModel = mongoose.models.WhatsAppSession || mongoose.model<IWhatsAppSessionDoc>('WhatsAppSession', WhatsAppSessionSchema);
     WhatsAppAuthStateModel = mongoose.models.WhatsAppAuthState || mongoose.model<IWhatsAppAuthStateDoc>('WhatsAppAuthState', WhatsAppAuthStateSchema);
+
+    await SmsModel.init();
 
     // Try dropping stale unique indexes if they exist to prevent constraint violations
     try {
@@ -573,6 +600,190 @@ export const dbAPI = {
       inMemoryProfiles.push(cleanData);
       return cleanData;
     }
+  },
+
+  async createSmsMessage(data: Partial<{ amount: number; sender: string; trxId: string; dateTime: string; status: 'Unused' | 'Used'; message: string; payload: any }>): Promise<any> {
+    const newId = `sms-${Date.now()}`;
+    const cleanData = {
+      amount: Number(data.amount) || 0,
+      sender: (data.sender || "unknown").trim(),
+      trxId: (data.trxId || "").trim().toUpperCase(),
+      dateTime: (data.dateTime || new Date().toISOString()).trim(),
+      status: (data.status || 'Unused') as 'Unused' | 'Used',
+      message: (data.message || "").toString(),
+      payload: data.payload ?? data
+    };
+
+    if (!cleanData.trxId) {
+      throw new Error("TrxID is required.");
+    }
+
+    if (!cleanData.message) {
+      throw new Error("SMS message is required.");
+    }
+
+    if (isMongoConnected && SmsModel) {
+      try {
+        const doc = await SmsModel.create(cleanData);
+        return {
+          _id: doc._id.toString(),
+          amount: doc.amount,
+          sender: doc.sender,
+          trxId: doc.trxId,
+          dateTime: doc.dateTime,
+          status: doc.status as 'Unused' | 'Used',
+          message: doc.message,
+          payload: doc.payload,
+          createdAt: doc.get('createdAt') ? doc.get('createdAt').toISOString() : new Date().toISOString()
+        };
+      } catch (err) {
+        console.error("MongoDB createSmsMessage error, using in-memory fallback:", err);
+        throw err;
+      }
+    }
+
+    const duplicate = inMemorySmsMessages.find(item => item.trxId === cleanData.trxId);
+    if (duplicate) {
+      const duplicateError: any = new Error("Duplicate TrxID detected.");
+      duplicateError.code = 11000;
+      throw duplicateError;
+    }
+
+    const created = {
+      _id: newId,
+      ...cleanData,
+      createdAt: new Date().toISOString()
+    };
+    inMemorySmsMessages.unshift(created);
+    return created;
+  },
+
+  async getSmsMessages(limit = 50): Promise<any[]> {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 500));
+
+    if (isMongoConnected && SmsModel) {
+      try {
+        const docs = await SmsModel.find({}).sort({ createdAt: -1 }).limit(safeLimit);
+        return docs.map(d => ({
+          _id: d._id.toString(),
+          amount: d.amount,
+          sender: d.sender,
+          trxId: d.trxId,
+          dateTime: d.dateTime,
+          status: d.status as 'Unused' | 'Used',
+          message: d.message,
+          payload: d.payload,
+          createdAt: d.get('createdAt') ? d.get('createdAt').toISOString() : new Date().toISOString()
+        }));
+      } catch (err) {
+        console.error("MongoDB getSmsMessages error, using in-memory fallback:", err);
+      }
+    }
+
+    return inMemorySmsMessages.slice(0, safeLimit);
+  },
+
+  async getSmsByTrxId(trxId: string): Promise<any | null> {
+    const cleanTrxId = trxId.trim().toUpperCase();
+
+    if (isMongoConnected && SmsModel) {
+      try {
+        const doc = await SmsModel.findOne({ trxId: cleanTrxId });
+        if (doc) {
+          return {
+            _id: doc._id.toString(),
+            amount: doc.amount,
+            sender: doc.sender,
+            trxId: doc.trxId,
+            dateTime: doc.dateTime,
+            status: doc.status as 'Unused' | 'Used',
+            message: doc.message,
+            payload: doc.payload,
+            createdAt: doc.get('createdAt') ? doc.get('createdAt').toISOString() : new Date().toISOString()
+          };
+        }
+      } catch (err) {
+        console.error("MongoDB getSmsByTrxId error:", err);
+      }
+    }
+
+    return inMemorySmsMessages.find(item => item.trxId === cleanTrxId) || null;
+  },
+
+  async validateAndUseTrxId(trxId: string): Promise<{ valid: boolean; used: boolean; record?: any; message: string }> {
+    const cleanTrxId = trxId.trim().toUpperCase();
+    if (!cleanTrxId) {
+      return { valid: false, used: false, message: "TrxID is required." };
+    }
+
+    if (isMongoConnected && SmsModel) {
+      try {
+        const doc = await SmsModel.findOne({ trxId: cleanTrxId });
+        if (!doc) {
+          return { valid: false, used: false, message: "Invalid TrxID." };
+        }
+
+        if (doc.status === 'Used') {
+          return {
+            valid: true,
+            used: false,
+            record: {
+              _id: doc._id.toString(),
+              amount: doc.amount,
+              sender: doc.sender,
+              trxId: doc.trxId,
+              dateTime: doc.dateTime,
+              status: doc.status,
+              message: doc.message,
+              payload: doc.payload
+            },
+            message: "TrxID is already used."
+          };
+        }
+
+        const updated = await SmsModel.findOneAndUpdate(
+          { trxId: cleanTrxId, status: 'Unused' },
+          { status: 'Used' },
+          { new: true }
+        );
+
+        if (!updated) {
+          return { valid: true, used: false, message: "TrxID could not be updated." };
+        }
+
+        return {
+          valid: true,
+          used: true,
+          record: {
+            _id: updated._id.toString(),
+            amount: updated.amount,
+            sender: updated.sender,
+            trxId: updated.trxId,
+            dateTime: updated.dateTime,
+            status: updated.status,
+            message: updated.message,
+            payload: updated.payload
+          },
+          message: "TrxID validated and marked as Used."
+        };
+      } catch (err) {
+        console.error("MongoDB validateAndUseTrxId error:", err);
+      }
+    }
+
+    const index = inMemorySmsMessages.findIndex(item => item.trxId === cleanTrxId);
+    if (index === -1) {
+      return { valid: false, used: false, message: "Invalid TrxID." };
+    }
+
+    const existing = inMemorySmsMessages[index];
+    if (existing.status === 'Used') {
+      return { valid: true, used: false, record: existing, message: "TrxID is already used." };
+    }
+
+    const updated = { ...existing, status: 'Used' as const };
+    inMemorySmsMessages[index] = updated;
+    return { valid: true, used: true, record: updated, message: "TrxID validated and marked as Used." };
   },
 
   async getWhatsAppSession(sessionId: string): Promise<any | null> {
