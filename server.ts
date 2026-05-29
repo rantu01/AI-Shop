@@ -1,7 +1,6 @@
 import "dotenv/config";
 import express from "express";
 import path from "path";
-import { fileURLToPath } from "url";
 import P from "pino";
 import { createServer as createViteServer } from "vite";
 import { connectDB, dbAPI, getDBStatus } from "./server/db.js";
@@ -29,8 +28,6 @@ function getStripeInstance() {
   return stripeInstance;
 }
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const whatsappAuthDir = path.join(process.cwd(), "auth_info_baileys");
 let whatsappLogs: WhatsAppLog[] = [
   {
