@@ -33,7 +33,10 @@ interface Order {
   items: OrderItem[];
   total: number;
   stripePaymentIntentId: string;
-  status: 'pending' | 'completed' | 'failed';
+  status: 'pending' | 'completed' | 'failed' | 'canceled';
+  paymentMethod?: 'stripe' | 'method2';
+  validationAttempts?: number;
+  trxId?: string;
   createdAt: string;
 }
 
@@ -64,6 +67,11 @@ export default function CustomerDashboard({
   const [cardNumber, setCardNumber] = useState("4242 •••• •••• 4242");
   const [cardExpiry, setCardExpiry] = useState("12/28");
   const [cardCvc, setCardCvc] = useState("392");
+  const [paymentMethod, setPaymentMethod] = useState<'stripe' | 'method2'>('stripe');
+  const [method2Order, setMethod2Order] = useState<Order | null>(null);
+  const [method2TrxId, setMethod2TrxId] = useState("");
+  const [method2Status, setMethod2Status] = useState("");
+  const [method2AttemptsLeft, setMethod2AttemptsLeft] = useState(5);
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [checkoutSuccess, setCheckoutSuccess] = useState<Order | null>(null);
   const [checkoutError, setCheckoutError] = useState("");
@@ -267,30 +275,92 @@ export default function CustomerDashboard({
     setCheckoutSuccess(null);
 
     try {
-      // Execute payment charge to server's endpoint
-      const res = await fetch("/api/payment/stripe", {
+      if (paymentMethod === 'stripe') {
+        const res = await fetch("/api/payment/stripe", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            email: user.email,
+            items: cart
+          })
+        });
+
+        const body = await res.json();
+        if (!res.ok) {
+          throw new Error(body.error || "Payment transaction processing failed.");
+        }
+
+        if (body.success) {
+          setCheckoutSuccess(body.order);
+          saveCart([]);
+          fetchOrderHistory();
+        }
+        return;
+      }
+
+      if (!method2Order) {
+        const res = await fetch("/api/payment/method-2", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            email: user.email,
+            items: cart
+          })
+        });
+
+        const body = await res.json();
+        if (!res.ok) {
+          throw new Error(body.error || "Could not create payment request.");
+        }
+
+        setMethod2Order(body.order);
+        setMethod2AttemptsLeft(5);
+        setMethod2Status(body.message || "Payment request created. Enter the TrxID to verify.");
+        setCheckoutError("");
+        return;
+      }
+
+      if (!method2TrxId.trim()) {
+        throw new Error("Please enter the TrxID from your SMS first.");
+      }
+
+      const res = await fetch("/validate-trx", {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          email: user.email,
-          items: cart
+          orderId: method2Order._id,
+          trxId: method2TrxId.trim()
         })
       });
 
       const body = await res.json();
-      if (!res.ok) {
-        throw new Error(body.error || "Payment transaction processing failed.");
+      if (body.used) {
+        setCheckoutSuccess(body.order || method2Order);
+        setMethod2Status(body.message || "Payment success.");
+        setMethod2Order(null);
+        setMethod2TrxId("");
+        setMethod2AttemptsLeft(5);
+        saveCart([]);
+        fetchOrderHistory();
+        return;
       }
 
-      if (body.success) {
-        setCheckoutSuccess(body.order);
-        // Clear active shopping cart state
-        saveCart([]);
-        // Sync history immediately
+      setMethod2AttemptsLeft(Number(body.attemptsLeft ?? 0));
+      setMethod2Status(body.message || "Please try again.");
+
+      if (body.canceled) {
+        setMethod2Order(null);
+        setMethod2TrxId("");
         fetchOrderHistory();
       }
+
+      throw new Error(body.message || "TrxID verification failed.");
     } catch (err: any) {
       setCheckoutError(err.message || "Something went wrong during payment authorization.");
     } finally {
@@ -567,56 +637,120 @@ export default function CustomerDashboard({
                     ) : (
                       <form onSubmit={handleCheckoutProcess} className="space-y-3">
                         <div>
+                          <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Payment Method</label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPaymentMethod('stripe');
+                                setMethod2Order(null);
+                                setMethod2Status("");
+                                setMethod2TrxId("");
+                                setMethod2AttemptsLeft(5);
+                              }}
+                              className={`rounded-xl border px-3 py-2 text-xs font-bold transition ${paymentMethod === 'stripe' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-600'}`}
+                            >
+                              Method 1: Stripe
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPaymentMethod('method2');
+                                setCheckoutError("");
+                                setCheckoutSuccess(null);
+                              }}
+                              className={`rounded-xl border px-3 py-2 text-xs font-bold transition ${paymentMethod === 'method2' ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-200 bg-white text-slate-600'}`}
+                            >
+                              Method 2: TrxID
+                            </button>
+                          </div>
+                        </div>
+
+                        {paymentMethod === 'method2' && (
+                          <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3 text-xs text-emerald-900 space-y-1">
+                            <p className="font-bold">Step 1: Create payment request.</p>
+                            <p>We will store a pending order first, then you can paste the TrxID from your SMS to verify.</p>
+                            <p className="font-mono text-[10px] text-emerald-700">Attempts left before cancel: {method2AttemptsLeft}</p>
+                            {method2Status && <p className="text-[10px] text-emerald-800">{method2Status}</p>}
+                          </div>
+                        )}
+
+                        <div>
                           <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Holder Coordinates</label>
                           <input
                             type="text"
-                            required
+                            required={paymentMethod === 'stripe'}
                             value={cardHolder}
                             onChange={(e) => setCardHolder(e.target.value)}
-                            placeholder="Cardholder Name"
+                            placeholder={paymentMethod === 'stripe' ? "Cardholder Name" : "Your Name"}
                             className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs outline-none focus:border-indigo-500 focus:bg-white"
                           />
                         </div>
 
-                        <div>
-                          <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Stripe Credit Card digits</label>
-                          <div className="relative">
-                            <input
-                              type="text"
-                              required
-                              value={cardNumber}
-                              onChange={(e) => setCardNumber(e.target.value)}
-                              placeholder="4242 4242 4242 4242"
-                              className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs outline-none focus:border-indigo-500 focus:bg-white pr-10 font-mono"
-                            />
-                            <CreditCard className="absolute top-2.5 right-3 h-4 w-4 text-slate-400" />
-                          </div>
-                        </div>
+                        {paymentMethod === 'stripe' ? (
+                          <>
+                            <div>
+                              <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Stripe Credit Card digits</label>
+                              <div className="relative">
+                                <input
+                                  type="text"
+                                    required={paymentMethod === 'stripe'}
+                                  value={cardNumber}
+                                  onChange={(e) => setCardNumber(e.target.value)}
+                                  placeholder="4242 4242 4242 4242"
+                                  className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs outline-none focus:border-indigo-500 focus:bg-white pr-10 font-mono"
+                                />
+                                <CreditCard className="absolute top-2.5 right-3 h-4 w-4 text-slate-400" />
+                              </div>
+                            </div>
 
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Expiry</label>
-                            <input
-                              type="text"
-                              required
-                              value={cardExpiry}
-                              onChange={(e) => setCardExpiry(e.target.value)}
-                              placeholder="MM/YY"
-                              className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs outline-none focus:border-indigo-500 focus:bg-white font-mono"
-                            />
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Expiry</label>
+                                <input
+                                  type="text"
+                                  required={paymentMethod === 'stripe'}
+                                  value={cardExpiry}
+                                  onChange={(e) => setCardExpiry(e.target.value)}
+                                  placeholder="MM/YY"
+                                  className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs outline-none focus:border-indigo-500 focus:bg-white font-mono"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Card Security Code</label>
+                                <input
+                                  type="text"
+                                  required={paymentMethod === 'stripe'}
+                                  value={cardCvc}
+                                  onChange={(e) => setCardCvc(e.target.value)}
+                                  placeholder="CVC"
+                                  className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs outline-none focus:border-indigo-500 focus:bg-white font-mono"
+                                />
+                              </div>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="space-y-3 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                            <div>
+                              <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Transaction ID</label>
+                              <input
+                                type="text"
+                                value={method2TrxId}
+                                onChange={(e) => setMethod2TrxId(e.target.value)}
+                                placeholder="Enter TrxID from SMS"
+                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs outline-none focus:border-emerald-500 font-mono"
+                              />
+                            </div>
+
+                            {method2Order && (
+                              <div className="rounded-xl bg-white p-3 text-[10px] text-slate-600 border border-slate-200 space-y-1">
+                                <p><span className="font-bold text-slate-800">Order ID:</span> {method2Order._id}</p>
+                                <p><span className="font-bold text-slate-800">Attempts left:</span> {method2AttemptsLeft}</p>
+                                <p><span className="font-bold text-slate-800">Status:</span> {method2Status || 'Pending verification'}</p>
+                              </div>
+                            )}
                           </div>
-                          <div>
-                            <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Card Security Code</label>
-                            <input
-                              type="text"
-                              required
-                              value={cardCvc}
-                              onChange={(e) => setCardCvc(e.target.value)}
-                              placeholder="CVC"
-                              className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs outline-none focus:border-indigo-500 focus:bg-white font-mono"
-                            />
-                          </div>
-                        </div>
+                        )}
 
                         {/* Checkout Submit triggers payment API */}
                         <button
@@ -627,12 +761,12 @@ export default function CustomerDashboard({
                           {checkoutLoading ? (
                             <>
                               <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></span>
-                              <span>Authorizing Striped Payment...</span>
+                              <span>{paymentMethod === 'stripe' ? 'Authorizing Striped Payment...' : method2Order ? 'Verifying Transaction...' : 'Creating Payment Request...'}</span>
                             </>
                           ) : (
                             <>
                               <CreditCard className="h-4 w-4" />
-                              <span>Authorize Payment - ${cartTotal.toFixed(2)}</span>
+                              <span>{paymentMethod === 'stripe' ? `Authorize Payment - $${cartTotal.toFixed(2)}` : method2Order ? 'Verify TrxID' : `Create Payment Request - $${cartTotal.toFixed(2)}`}</span>
                             </>
                           )}
                         </button>

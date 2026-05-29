@@ -48,7 +48,10 @@ export interface Order {
   items: OrderItem[];
   total: number;
   stripePaymentIntentId: string;
-  status: 'pending' | 'completed' | 'failed';
+  status: 'pending' | 'completed' | 'failed' | 'canceled';
+  paymentMethod?: 'stripe' | 'method2';
+  validationAttempts?: number;
+  trxId?: string;
   createdAt: string;
 }
 

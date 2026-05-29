@@ -504,12 +504,77 @@ async function startServer() {
     }
   });
 
+  app.post("/api/payment/method-2", async (req, res) => {
+    try {
+      const { items, email } = req.body;
+      if (!items || !Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: "Shopping cart items is required." });
+      }
+      if (!email) {
+        return res.status(400).json({ error: "Customer email is required." });
+      }
+
+      let total = 0;
+      const resolvedItems = [];
+
+      for (const item of items) {
+        const prod = await dbAPI.getProductBySku(item.sku);
+        if (!prod) {
+          return res.status(404).json({ error: `Product with SKU ${item.sku} not found in our catalog.` });
+        }
+
+        const currentQty = Number(item.quantity) || 1;
+        resolvedItems.push({
+          productId: prod._id,
+          name: prod.name,
+          sku: prod.sku,
+          price: prod.price,
+          quantity: currentQty,
+          image: prod.images[0] || "https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=600&q=80"
+        });
+        total += prod.price * currentQty;
+      }
+
+      const order = await dbAPI.createOrder({
+        userEmail: email,
+        items: resolvedItems,
+        total,
+        stripePaymentIntentId: "",
+        status: "pending",
+        paymentMethod: "method2",
+        validationAttempts: 0,
+        trxId: ""
+      } as any);
+
+      res.status(201).json({
+        success: true,
+        message: "Payment method 2 order created. Please enter your TrxID to verify the payment.",
+        order
+      });
+    } catch (error: any) {
+      console.error("Method 2 order creation failure:", error);
+      res.status(500).json({ error: error.message || "Failed to create method 2 order" });
+    }
+  });
+
   app.post("/validate-trx", async (req, res) => {
     try {
       const trxId = String(req.body?.trxId || req.body?.TrxID || req.query?.trxId || "").trim();
+      const orderId = String(req.body?.orderId || req.query?.orderId || "").trim();
 
       if (!trxId) {
         return res.status(400).json({ valid: false, used: false, message: "TrxID is required." });
+      }
+
+      if (orderId) {
+        const result = await dbAPI.processMethod2Validation(orderId, trxId);
+        if (result.used) {
+          return res.json(result);
+        }
+        if (result.canceled) {
+          return res.status(410).json(result);
+        }
+        return res.status(result.valid ? 409 : 404).json(result);
       }
 
       const result = await dbAPI.validateAndUseTrxId(trxId);

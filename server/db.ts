@@ -24,6 +24,9 @@ export interface IProductDoc extends Document {
 export interface IOrderDoc extends Document {
   userEmail: string;
   orderNumber?: string;
+  paymentMethod?: 'stripe' | 'method2';
+  validationAttempts?: number;
+  trxId?: string;
   items: Array<{
     productId: string;
     name: string;
@@ -34,7 +37,7 @@ export interface IOrderDoc extends Document {
   }>;
   total: number;
   stripePaymentIntentId: string;
-  status: string;
+  status: 'pending' | 'completed' | 'failed' | 'canceled';
 }
 
 export interface ISmsDoc extends Document {
@@ -67,6 +70,9 @@ const ProductSchema = new Schema<IProductDoc>({
 const OrderSchema = new Schema<IOrderDoc>({
   userEmail: { type: String, required: true, index: true },
   orderNumber: { type: String, required: false },
+  paymentMethod: { type: String, enum: ['stripe', 'method2'], default: 'stripe' },
+  validationAttempts: { type: Number, default: 0 },
+  trxId: { type: String, default: '', index: true },
   items: [{
     productId: { type: String, required: true },
     name: { type: String, required: true, default: "Product Item" },
@@ -77,7 +83,7 @@ const OrderSchema = new Schema<IOrderDoc>({
   }],
   total: { type: Number, required: true, default: 0 },
   stripePaymentIntentId: { type: String, default: "" },
-  status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' }
+  status: { type: String, enum: ['pending', 'completed', 'failed', 'canceled'], default: 'pending' }
 }, { timestamps: true });
 
 const SmsSchema = new Schema<ISmsDoc>({
@@ -503,6 +509,9 @@ export const dbAPI = {
           total: d.total,
           stripePaymentIntentId: d.stripePaymentIntentId,
           status: d.status as any,
+          paymentMethod: d.paymentMethod as any,
+          validationAttempts: d.validationAttempts || 0,
+          trxId: d.trxId || "",
           createdAt: d.get('createdAt') ? d.get('createdAt').toISOString() : new Date().toISOString()
         }));
       } catch (err) {
@@ -518,6 +527,9 @@ export const dbAPI = {
     const cleanData = {
       userEmail: data.userEmail || "guest@test.com",
       orderNumber: data.orderNumber || generatedOrderNumber,
+      paymentMethod: (data as any).paymentMethod || 'stripe',
+      validationAttempts: Number((data as any).validationAttempts) || 0,
+      trxId: (data as any).trxId || "",
       items: data.items || [],
       total: data.total || 0,
       stripePaymentIntentId: data.stripePaymentIntentId || "",
@@ -535,6 +547,9 @@ export const dbAPI = {
           total: doc.total,
           stripePaymentIntentId: doc.stripePaymentIntentId,
           status: doc.status as any,
+          paymentMethod: doc.paymentMethod as any,
+          validationAttempts: doc.validationAttempts || 0,
+          trxId: doc.trxId || "",
           createdAt: doc.get('createdAt') ? doc.get('createdAt').toISOString() : new Date().toISOString()
         };
       } catch (err) {
@@ -565,6 +580,70 @@ export const dbAPI = {
       }
     }
     return inMemoryProfiles.find(p => p.email === email) || null;
+  },
+
+  async getOrderById(orderId: string): Promise<any | null> {
+    if (isMongoConnected && OrderModel) {
+      try {
+        const doc = await OrderModel.findById(orderId);
+        if (doc) {
+          return {
+            _id: doc._id.toString(),
+            userEmail: doc.userEmail,
+            items: doc.items,
+            total: doc.total,
+            stripePaymentIntentId: doc.stripePaymentIntentId,
+            status: doc.status as any,
+            paymentMethod: doc.paymentMethod as any,
+            validationAttempts: doc.validationAttempts || 0,
+            trxId: doc.trxId || "",
+            createdAt: doc.get('createdAt') ? doc.get('createdAt').toISOString() : new Date().toISOString()
+          };
+        }
+      } catch (err) {
+        console.error("MongoDB getOrderById error:", err);
+      }
+    }
+
+    return inMemoryOrders.find(o => o._id === orderId) || null;
+  },
+
+  async updateOrderById(orderId: string, data: Partial<Order & { paymentMethod?: 'stripe' | 'method2'; validationAttempts?: number; trxId?: string }>): Promise<any | null> {
+    const cleanData = {
+      ...data,
+      trxId: data.trxId ? String(data.trxId).trim().toUpperCase() : undefined
+    };
+
+    if (isMongoConnected && OrderModel) {
+      try {
+        const doc = await OrderModel.findByIdAndUpdate(orderId, cleanData, { new: true });
+        if (doc) {
+          return {
+            _id: doc._id.toString(),
+            userEmail: doc.userEmail,
+            items: doc.items,
+            total: doc.total,
+            stripePaymentIntentId: doc.stripePaymentIntentId,
+            status: doc.status as any,
+            paymentMethod: doc.paymentMethod as any,
+            validationAttempts: doc.validationAttempts || 0,
+            trxId: doc.trxId || "",
+            createdAt: doc.get('createdAt') ? doc.get('createdAt').toISOString() : new Date().toISOString()
+          };
+        }
+      } catch (err) {
+        console.error("MongoDB updateOrderById error:", err);
+      }
+    }
+
+    const index = inMemoryOrders.findIndex(o => o._id === orderId);
+    if (index !== -1) {
+      const updated = { ...inMemoryOrders[index], ...cleanData } as any;
+      inMemoryOrders[index] = updated;
+      return updated;
+    }
+
+    return null;
   },
 
   async updateUserProfile(email: string, data: Partial<UserProfile>): Promise<UserProfile> {
@@ -786,6 +865,81 @@ export const dbAPI = {
     return { valid: true, used: true, record: updated, message: "TrxID validated and marked as Used." };
   },
 
+  async processMethod2Validation(orderId: string, trxId: string): Promise<{ valid: boolean; used: boolean; canceled?: boolean; attemptsLeft: number; record?: any; order?: any; message: string }> {
+    const cleanTrxId = trxId.trim().toUpperCase();
+    const order = await dbAPI.getOrderById(orderId);
+
+    if (!order) {
+      return { valid: false, used: false, attemptsLeft: 0, message: "Order not found." };
+    }
+
+    if (order.status === 'completed') {
+      return { valid: true, used: true, attemptsLeft: Math.max(0, 5 - Number(order.validationAttempts || 0)), order, message: "Order is already completed." };
+    }
+
+    if (order.status === 'canceled') {
+      return { valid: false, used: false, canceled: true, attemptsLeft: 0, order, message: "Order is canceled." };
+    }
+
+    const maxAttempts = 5;
+    const nextAttemptCount = Number(order.validationAttempts || 0) + 1;
+
+    const smsRecord = await this.getSmsByTrxId(cleanTrxId);
+    if (!smsRecord) {
+      const updatedOrder = await dbAPI.updateOrderById(orderId, {
+        status: nextAttemptCount >= maxAttempts ? 'canceled' : 'pending',
+        validationAttempts: nextAttemptCount
+      });
+
+      return {
+        valid: false,
+        used: false,
+        canceled: nextAttemptCount >= maxAttempts,
+        attemptsLeft: Math.max(0, maxAttempts - nextAttemptCount),
+        order: updatedOrder,
+        message: nextAttemptCount >= maxAttempts
+          ? "Wrong TrxID 5 times. Order has been canceled."
+          : `Wrong TrxID. Please try again. Attempts left: ${Math.max(0, maxAttempts - nextAttemptCount)}`
+      };
+    }
+
+    if (smsRecord.status === 'Used') {
+      const updatedOrder = await dbAPI.updateOrderById(orderId, {
+        validationAttempts: nextAttemptCount,
+        status: nextAttemptCount >= maxAttempts ? 'canceled' : 'pending'
+      });
+
+      return {
+        valid: true,
+        used: false,
+        canceled: nextAttemptCount >= maxAttempts,
+        attemptsLeft: Math.max(0, maxAttempts - nextAttemptCount),
+        record: smsRecord,
+        order: updatedOrder,
+        message: nextAttemptCount >= maxAttempts
+          ? "This TrxID is already used. Order has been canceled after 5 attempts."
+          : `This TrxID is already used. Please try again. Attempts left: ${Math.max(0, maxAttempts - nextAttemptCount)}`
+      };
+    }
+
+    const markedSms = await dbAPI.updateSmsStatusByTrxId(cleanTrxId, 'Used');
+    const updatedOrder = await dbAPI.updateOrderById(orderId, {
+      trxId: cleanTrxId,
+      status: 'completed',
+      validationAttempts: nextAttemptCount
+    });
+
+    return {
+      valid: true,
+      used: true,
+      canceled: false,
+      attemptsLeft: Math.max(0, maxAttempts - nextAttemptCount),
+      record: markedSms,
+      order: updatedOrder,
+      message: "Transaction matched. Order payment success."
+    };
+  },
+
   async getWhatsAppSession(sessionId: string): Promise<any | null> {
     if (isMongoConnected && WhatsAppSessionModel) {
       try {
@@ -881,5 +1035,38 @@ export const dbAPI = {
     }
 
     delete inMemoryWhatsAppAuthState[sessionId];
+  },
+
+  async updateSmsStatusByTrxId(trxId: string, status: 'Unused' | 'Used'): Promise<any | null> {
+    const cleanTrxId = trxId.trim().toUpperCase();
+
+    if (isMongoConnected && SmsModel) {
+      try {
+        const doc = await SmsModel.findOneAndUpdate({ trxId: cleanTrxId }, { status }, { new: true });
+        if (doc) {
+          return {
+            _id: doc._id.toString(),
+            amount: doc.amount,
+            sender: doc.sender,
+            trxId: doc.trxId,
+            dateTime: doc.dateTime,
+            status: doc.status as 'Unused' | 'Used',
+            message: doc.message,
+            payload: doc.payload,
+            createdAt: doc.get('createdAt') ? doc.get('createdAt').toISOString() : new Date().toISOString()
+          };
+        }
+      } catch (err) {
+        console.error("MongoDB updateSmsStatusByTrxId error:", err);
+      }
+    }
+
+    const index = inMemorySmsMessages.findIndex(item => item.trxId === cleanTrxId);
+    if (index === -1) {
+      return null;
+    }
+
+    inMemorySmsMessages[index] = { ...inMemorySmsMessages[index], status };
+    return inMemorySmsMessages[index];
   }
 };
