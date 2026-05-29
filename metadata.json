@@ -1,0 +1,6 @@
+{
+  "name": "Shera Sawda",
+  "description": "Premium e-commerce platform 'Shera Sawda' with product management, custom categories, elegant user cart checkout using simulated Stripe integration, WhatsApp automation bot, and responsive visual design.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
