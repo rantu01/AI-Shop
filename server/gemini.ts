@@ -21,6 +21,35 @@ interface BotResult {
 
 const DEFAULT_WEBSITE_URL = "https://ai-shop.rantumondal.codes/";
 
+function getSkuPromptReply() {
+  return "কি জানতে চান? কোন product নেবেন সেটার SKU বলুন।";
+}
+
+function isGeminiUnavailableError(error: any) {
+  const message = String(error?.message || error || "").toLowerCase();
+  const statusCode = Number(error?.status || error?.code || 0);
+  return (
+    message.includes("expired") ||
+    message.includes("quota") ||
+    message.includes("billing") ||
+    message.includes("credential") ||
+    message.includes("unauthorized") ||
+    message.includes("unauthenticated") ||
+    message.includes("authentication") ||
+    message.includes("permission") ||
+    message.includes("api key") ||
+    message.includes("api-key") ||
+    message.includes("token") ||
+    message.includes("access denied") ||
+    message.includes("resource exhausted") ||
+    message.includes("exceeded") ||
+    message.includes("invalid api key") ||
+    statusCode === 401 ||
+    statusCode === 403 ||
+    statusCode === 429
+  );
+}
+
 /**
  * Main E-commerce Gemini conversational AI broker.
  * Leverages the database state to answer user product queries accurately.
@@ -75,34 +104,8 @@ export async function getBotResponse(incomingText: string, websiteUrl: string = 
   if (!process.env.GEMINI_API_KEY) {
     console.warn("⚠️ GEMINI_API_KEY is not configured on the server. Using pre-programmed simulated AI Sales Bot response.");
     if (matchedProduct) {
-      const isAvailable = matchedProduct.stock > 0;
-      const lowerText = incomingText.toLowerCase();
-      const isStockQuery = lowerText.includes("how many") || lowerText.includes("left") || lowerText.includes("stock") || lowerText.includes("quantity") || lowerText.includes("available");
-      
-      if (isStockQuery) {
-        if (isAvailable) {
-          return {
-            reply: `🤖 *Simulated Sales Bot:* We currently have ${matchedProduct.stock} items left in stock of ${matchedProduct.name}.`,
-            matchedSku: matchedProduct.sku,
-            productFound: true
-          };
-        } else {
-          // Find alternative products from database
-          const activeAlternatives = products.filter(p => p.sku !== matchedProduct.sku && p.stock > 0);
-          const altsText = activeAlternatives.length > 0 
-            ? `However, we suggest checking out these in-stock alternatives:\n` + activeAlternatives.slice(0, 2).map(p => `- **${p.name}** (Code: ${p.sku}) for $${p.price}`).join("\n")
-            : `Please feel free to check our website for future updates.`;
-          return {
-            reply: `🤖 *Simulated Sales Bot:* Sorry, "${matchedProduct.name}" is currently out of stock. ${altsText}\nYou can also explore other items on our website [Website Link](${websiteUrl}).`,
-            matchedSku: matchedProduct.sku,
-            productFound: true
-          };
-        }
-      }
-
-      const availabilityText = isAvailable ? `Yes, it is available! We currently have ${matchedProduct.stock} units in stock.` : "Sorry, this item is currently out of stock.";
       return {
-        reply: `🤖 *Simulated Sales Bot:* Hi! Yes, I found the product code **${matchedProduct.sku}** in our catalog.\n\n* **Name:** ${matchedProduct.name}\n* **Price:** $${matchedProduct.price}\n* **Availability:** ${availabilityText}\n\n* **Description:** ${matchedProduct.description}\n\nWould you like me to help you complete an order? You can tap our WhatsApp chat link to place your order directly.`,
+        reply: getSkuPromptReply(),
         matchedSku: matchedProduct.sku,
         productFound: true
       };
@@ -114,7 +117,7 @@ export async function getBotResponse(incomingText: string, websiteUrl: string = 
       };
     } else {
       return {
-        reply: `🤖 *Simulated Sales Bot:* Welcome to our automated e-commerce catalog assistant! I notice you are asking about our products.\n\nCould you please provide the specific **Product Code (SKU)** of the item you are interested in? (For example: **ELEC-001** or **ELEC-002** or **FASH-001**). You can find these product codes displayed on our e-commerce store next to each item details page.`,
+        reply: getSkuPromptReply(),
         productFound: false
       };
     }
@@ -186,6 +189,13 @@ Act as instructed. If their message can't be resolved with a specific product, p
 
   } catch (error) {
     console.error("Gemini API execution error:", error);
+    if (isGeminiUnavailableError(error)) {
+      return {
+        reply: getSkuPromptReply(),
+        productFound: false
+      };
+    }
+
     // Safe user fallback response
     if (matchedProduct) {
       return {

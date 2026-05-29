@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import { promises as fs } from "fs";
 import path from "path";
 import P from "pino";
 import { createServer as createViteServer } from "vite";
@@ -44,6 +45,10 @@ let whatsappLogs: WhatsAppLog[] = [
 let whatsappSocket: any = null;
 let whatsappBootstrapPromise: Promise<void> | null = null;
 
+async function ensureWhatsAppAuthDir() {
+  await fs.mkdir(whatsappAuthDir, { recursive: true });
+}
+
 function extractWhatsAppText(message: any) {
   return (
     message?.conversation ||
@@ -75,162 +80,202 @@ async function startWhatsAppBridge() {
   }
 
   whatsappBootstrapPromise = (async () => {
-    const logger = P({ level: "silent" });
-    const { state, saveCreds } = await useMultiFileAuthState(whatsappAuthDir);
-    const { version } = await fetchLatestBaileysVersion();
+    try {
+      await ensureWhatsAppAuthDir();
 
-    whatsappSocket = makeWASocket({
-      version,
-      logger,
-      printQRInTerminal: false,
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger)
-      },
-      browser: ["Shera Sawda", "Chrome", "1.0.0"]
-    });
+      const logger = P({ level: "silent" });
+      const { state, saveCreds } = await useMultiFileAuthState(whatsappAuthDir);
 
-    whatsappSocket.ev.on("creds.update", saveCreds);
-
-    whatsappSocket.ev.on("messages.upsert", async (event: any) => {
+      let version: [number, number, number] = [2, 3000, 1015901307];
       try {
-        const whatsappMessage = event?.messages?.[0];
-        if (!whatsappMessage || whatsappMessage.key?.fromMe) {
-          return;
+        const latestVersion = await fetchLatestBaileysVersion();
+        if (Array.isArray(latestVersion?.version)) {
+          version = latestVersion.version as [number, number, number];
         }
-
-        const remoteJid = whatsappMessage.key?.remoteJid;
-        if (!remoteJid || remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast") {
-          return;
-        }
-
-        const incomingText = extractWhatsAppText(whatsappMessage.message);
-        if (!incomingText) {
-          return;
-        }
-
-        const customerNumber = remoteJid.split("@")[0];
-        const hostHeader = process.env.APP_URL || DEFAULT_APP_URL;
-
-        const incomingLog: WhatsAppLog = {
-          id: `msg-in-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          from: customerNumber,
-          message: incomingText,
-          type: "incoming"
-        };
-        whatsappLogs.push(incomingLog);
-
-        whatsappLogs.push({
-          id: `sys-${Date.now()}-analysing`,
-          timestamp: new Date().toISOString(),
-          from: "AI Engine",
-          message: `Analyzing incoming text from ${customerNumber}. Fetching Mongoose catalog metrics...`,
-          type: "system"
-        });
-
-        const aiResponse = await getBotResponse(incomingText, hostHeader);
-
-        const outgoingLog: WhatsAppLog = {
-          id: `msg-out-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          from: "AI Bot (Seller)",
-          message: aiResponse.reply,
-          response: incomingText,
-          type: "outgoing"
-        };
-        whatsappLogs.push(outgoingLog);
-
-        if (whatsappSocket) {
-          await whatsappSocket.sendMessage(remoteJid, { text: aiResponse.reply });
-        }
-      } catch (error: any) {
-        console.error("WhatsApp message handler failure:", error);
-        whatsappLogs.push({
-          id: `msg-err-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          from: "AI Bot (Seller)",
-          message: "Pardon me, I encountered a database lookup latency. Could you please resend the model code?",
-          type: "outgoing"
-        });
+      } catch (versionError) {
+        console.warn("Baileys version fetch failed, using pinned fallback version:", versionError);
       }
-    });
 
-    whatsappSocket.ev.on("connection.update", async (update: any) => {
-      const { connection, lastDisconnect, qr } = update;
+      whatsappSocket = makeWASocket({
+        version,
+        logger,
+        printQRInTerminal: false,
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, logger)
+        },
+        browser: ["Shera Sawda", "Chrome", "1.0.0"]
+      });
 
-      if (qr) {
-        const qrDataUrl = await QRCode.toDataURL(qr, {
-          margin: 2,
-          scale: 8,
-          color: {
-            dark: "#030712",
-            light: "#ffffff"
+      whatsappSocket.ev.on("creds.update", saveCreds);
+
+      whatsappSocket.ev.on("messages.upsert", async (event: any) => {
+        try {
+          const whatsappMessage = event?.messages?.[0];
+          if (!whatsappMessage || whatsappMessage.key?.fromMe) {
+            return;
           }
-        });
 
-        await updateWhatsAppSession({
-          connected: false,
-          status: "connecting",
-          qrCode: qrDataUrl,
-          phoneNumber: ""
-        });
+          const remoteJid = whatsappMessage.key?.remoteJid;
+          if (!remoteJid || remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast") {
+            return;
+          }
 
-        whatsappLogs.push({
-          id: `log-${Date.now()}-qr`,
-          timestamp: new Date().toISOString(),
-          from: "Server",
-          message: "Generated live WhatsApp Web QR code. Scan it from WhatsApp > Linked devices.",
-          type: "system"
-        });
-      }
+          const incomingText = extractWhatsAppText(whatsappMessage.message);
+          if (!incomingText) {
+            return;
+          }
 
-      if (connection === "open") {
-        const phoneNumber = whatsappSocket?.user?.id ? whatsappSocket.user.id.split(":")[0] : "";
-        await updateWhatsAppSession({
-          connected: true,
-          status: "connected",
-          qrCode: "",
-          phoneNumber
-        });
+          const customerNumber = remoteJid.split("@")[0];
+          const hostHeader = process.env.APP_URL || DEFAULT_APP_URL;
 
-        whatsappLogs.push({
-          id: `log-${Date.now()}-open`,
-          timestamp: new Date().toISOString(),
-          from: "System",
-          message: `✅ WhatsApp connected successfully${phoneNumber ? ` for ${phoneNumber}` : ""}.`,
-          type: "system"
-        });
-      }
+          const incomingLog: WhatsAppLog = {
+            id: `msg-in-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            from: customerNumber,
+            message: incomingText,
+            type: "incoming"
+          };
+          whatsappLogs.push(incomingLog);
 
-      if (connection === "close") {
-        const disconnectCode = (lastDisconnect?.error as any)?.output?.statusCode;
-        const loggedOut = disconnectCode === DisconnectReason.loggedOut;
+          whatsappLogs.push({
+            id: `sys-${Date.now()}-analysing`,
+            timestamp: new Date().toISOString(),
+            from: "AI Engine",
+            message: `Analyzing incoming text from ${customerNumber}. Fetching Mongoose catalog metrics...`,
+            type: "system"
+          });
 
-        await updateWhatsAppSession({
-          connected: false,
-          status: "disconnected",
-          qrCode: "",
-          phoneNumber: ""
-        });
+          const aiResponse = await getBotResponse(incomingText, hostHeader);
 
-        whatsappLogs.push({
-          id: `log-${Date.now()}-close`,
-          timestamp: new Date().toISOString(),
-          from: "System",
-          message: loggedOut
-            ? "WhatsApp session logged out. Scan again to reconnect."
-            : "WhatsApp connection closed. Reconnecting bridge...",
-          type: "system"
-        });
+          const outgoingLog: WhatsAppLog = {
+            id: `msg-out-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            from: "AI Bot (Seller)",
+            message: aiResponse.reply,
+            response: incomingText,
+            type: "outgoing"
+          };
+          whatsappLogs.push(outgoingLog);
 
-        whatsappSocket = null;
-        if (!loggedOut) {
-          whatsappBootstrapPromise = null;
-          void startWhatsAppBridge();
+          if (whatsappSocket) {
+            await whatsappSocket.sendMessage(remoteJid, { text: aiResponse.reply });
+          }
+        } catch (error: any) {
+          console.error("WhatsApp message handler failure:", error);
+          whatsappLogs.push({
+            id: `msg-err-${Date.now()}`,
+            timestamp: new Date().toISOString(),
+            from: "AI Bot (Seller)",
+            message: "কি জানতে চান? কোন product নেবেন সেটার SKU বলুন।",
+            type: "outgoing"
+          });
         }
-      }
-    });
+      });
+
+      whatsappSocket.ev.on("connection.update", async (update: any) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+          try {
+            const qrDataUrl = await QRCode.toDataURL(qr, {
+              margin: 2,
+              scale: 8,
+              color: {
+                dark: "#030712",
+                light: "#ffffff"
+              }
+            });
+
+            await updateWhatsAppSession({
+              connected: false,
+              status: "connecting",
+              qrCode: qrDataUrl,
+              phoneNumber: ""
+            });
+
+            whatsappLogs.push({
+              id: `log-${Date.now()}-qr`,
+              timestamp: new Date().toISOString(),
+              from: "Server",
+              message: "Generated live WhatsApp Web QR code. Scan it from WhatsApp > Linked devices.",
+              type: "system"
+            });
+          } catch (qrError) {
+            console.error("WhatsApp QR generation failure:", qrError);
+            await updateWhatsAppSession({
+              connected: false,
+              status: "connecting",
+              qrCode: "",
+              phoneNumber: ""
+            });
+          }
+        }
+
+        if (connection === "open") {
+          const phoneNumber = whatsappSocket?.user?.id ? whatsappSocket.user.id.split(":")[0] : "";
+          await updateWhatsAppSession({
+            connected: true,
+            status: "connected",
+            qrCode: "",
+            phoneNumber
+          });
+
+          whatsappLogs.push({
+            id: `log-${Date.now()}-open`,
+            timestamp: new Date().toISOString(),
+            from: "System",
+            message: `✅ WhatsApp connected successfully${phoneNumber ? ` for ${phoneNumber}` : ""}.`,
+            type: "system"
+          });
+        }
+
+        if (connection === "close") {
+          const disconnectCode = (lastDisconnect?.error as any)?.output?.statusCode;
+          const loggedOut = disconnectCode === DisconnectReason.loggedOut;
+
+          await updateWhatsAppSession({
+            connected: false,
+            status: "disconnected",
+            qrCode: "",
+            phoneNumber: ""
+          });
+
+          whatsappLogs.push({
+            id: `log-${Date.now()}-close`,
+            timestamp: new Date().toISOString(),
+            from: "System",
+            message: loggedOut
+              ? "WhatsApp session logged out. Scan again to reconnect."
+              : "WhatsApp connection closed. Reconnecting bridge...",
+            type: "system"
+          });
+
+          whatsappSocket = null;
+          if (!loggedOut) {
+            whatsappBootstrapPromise = null;
+            void startWhatsAppBridge();
+          }
+        }
+      });
+    } catch (error) {
+      console.error("WhatsApp bridge bootstrap failure:", error);
+      whatsappSocket = null;
+      await updateWhatsAppSession({
+        connected: false,
+        status: "disconnected",
+        qrCode: "",
+        phoneNumber: ""
+      });
+
+      whatsappLogs.push({
+        id: `log-${Date.now()}-bootstrap-error`,
+        timestamp: new Date().toISOString(),
+        from: "Server",
+        message: "WhatsApp bridge could not start right now. Please retry connection after the server finishes initializing.",
+        type: "system"
+      });
+    }
   })();
 
   try {
@@ -566,6 +611,12 @@ async function startServer() {
 
   app.post("/api/whatsapp/connect", async (req, res) => {
     try {
+      await updateWhatsAppSession({
+        connected: false,
+        status: "connecting",
+        qrCode: "",
+        phoneNumber: ""
+      });
       await startWhatsAppBridge();
       const updated = await dbAPI.getWhatsAppSession("default");
 
@@ -577,9 +628,20 @@ async function startServer() {
         type: "system"
       });
 
-      res.json(updated);
+      res.json(updated || { connected: false, status: "connecting", qrCode: "", phoneNumber: "" });
     } catch (err: any) {
-      res.status(500).json({ error: err.message || "Failed initializing connection" });
+      console.error("WhatsApp connect endpoint failure:", err);
+      const fallbackSession = await dbAPI.updateWhatsAppSession("default", {
+        connected: false,
+        status: "disconnected",
+        qrCode: "",
+        phoneNumber: ""
+      });
+
+      res.status(200).json({
+        ...(fallbackSession || { connected: false, status: "disconnected", qrCode: "", phoneNumber: "" }),
+        message: "WhatsApp bridge could not initialize yet. Please retry in a moment."
+      });
     }
   });
 
