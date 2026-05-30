@@ -31,12 +31,7 @@ function buildSearchHelpReply(sampleSku: string, websiteUrl: string): string {
   return `হ্যালো! আমাদের ** সেরা সওদা **  ওয়েবসাইটে আপনাকে স্বাগতম। পণ্য খুঁজতে নিচের যেকোনো একটি ভাবে মেসেজ করুন:
 
 **Available product categories:**
-
 ${categoryList}
-
-
-
-**Browse here:** ${websiteUrl}
 
 **কীভাবে লিখবেন:**
 - "${sampleSku} এর দাম কত?"
@@ -47,6 +42,9 @@ ${categoryList}
 আপনি শুধু নাম, category, SKU, বা product code লিখলেই আমরা relevant product দেখাব।
 বা
 type **explore** to see all products.
+
+
+**Browse here:** ${websiteUrl}
 `
 ;
 }

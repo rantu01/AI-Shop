@@ -194,7 +194,7 @@ function buildProductListReply(products: any[], page: number, pageSize: number) 
     : "Available Products";
 
   return {
-    reply: [header, "", lines].concat(paginated.total > paginated.page * paginated.pageSize ? ["Type NEXT to see more products."] : []).join("\n\n"),
+    reply: [header, lines].concat(paginated.total > paginated.page * paginated.pageSize ? [""] : []).join("\n\n"),
     nextPage: paginated.page + 1,
     hasMore: paginated.total > paginated.page * paginated.pageSize,
     pageSize: paginated.pageSize,
@@ -212,13 +212,12 @@ function buildCategoryListReply(categories: any[], websiteUrl: string) {
   return [
     "হ্যালো! আমাদের ** সেরা সওদা **  ওয়েবসাইটে আপনাকে স্বাগতম। পণ্য খুঁজতে নিচের যেকোনো একটি ভাবে মেসেজ করুন:",
     "",
-    "Available product categories:",
-    lines,
-    "",
+    // "Available product categories:",
+    // lines,
     "*কীভাবে লিখবেন:*",
       "BM-2408 এর দাম কত?",
-      "BM-2408স্টকে আছে কি?",
-      "Show me Shera Sawda Exclusive products",
+      "BM-2408 স্টকে আছে কি?",
+      "Do You have *____*",
       "I want to explore products",
     "",
     "type *explore* to see all products.",
@@ -370,7 +369,7 @@ async function getBotCatalogReply(incomingText: string, websiteUrl: string, cust
     }
 
     return {
-      reply: `${pagination.reply}${pagination.hasMore ? "\n\nType NEXT to see more products." : "\n\nAll products have been shown."}`,
+      reply: `${pagination.reply}${pagination.hasMore ? "Type SKU code to see product details\n\nType NEXT to see more products." : "\n\nAll products have been shown."}`,
       mode: "catalog" as WhatsAppReplyMode,
       productFound: pagination.items.length > 0,
       page: nextPage
@@ -385,7 +384,7 @@ async function getBotCatalogReply(incomingText: string, websiteUrl: string, cust
       resultIds: sortProductsForDisplay(products).map((product) => product._id)
     };
     return {
-      reply: `${pagination.reply}${pagination.hasMore ? "\n\nType NEXT to see more products." : "\n\nAll products have been shown."}`,
+      reply: `${pagination.reply}${pagination.hasMore ? "Type SKU code to see product details\nType NEXT to see more products." : "\n\nAll products have been shown."}`,
       mode: "catalog" as WhatsAppReplyMode,
       productFound: pagination.items.length > 0,
       page: 1
@@ -410,7 +409,6 @@ async function getBotCatalogReply(incomingText: string, websiteUrl: string, cust
           `No matching products were found for "${query}".`,
           "Try one of these next:",
           "- type explore to see all products",
-          "- type categories to see product categories",
           "- send a product name, SKU, or code",
           "- ask: do you have [product name]?"
         ].join("\n"),
