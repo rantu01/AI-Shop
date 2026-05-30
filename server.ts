@@ -48,6 +48,254 @@ let whatsappLogs: WhatsAppLog[] = [
 let whatsappSocket: any = null;
 let whatsappBootstrapPromise: Promise<void> | null = null;
 let whatsappAuthSyncTimer: NodeJS.Timeout | null = null;
+let whatsappReconnectTimer: NodeJS.Timeout | null = null;
+let whatsappBridgeVersion = 0;
+let whatsappBotSettings = {
+  sessionId: "default",
+  geminiReplyLimit: 4
+};
+
+type ConversationState = {
+  geminiRepliesUsed: number;
+  lastCategorySlug?: string;
+  lastCategoryName?: string;
+};
+
+type WhatsAppReplyMode = "gemini" | "catalog" | "sku" | "categories";
+
+const whatsappConversations = new Map<string, ConversationState>();
+
+function normalizeCustomerNumber(value: string) {
+  return String(value || "").replace(/[^\d+]/g, "").trim() || String(value || "").trim();
+}
+
+function normalizeLookupText(value: string) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function compactNumber(value: string) {
+  return String(value || "").replace(/[^\d]/g, "");
+}
+
+function getConversationState(customerNumber: string): ConversationState {
+  const key = normalizeCustomerNumber(customerNumber);
+  const existing = whatsappConversations.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const created: ConversationState = { geminiRepliesUsed: 0 };
+  whatsappConversations.set(key, created);
+  return created;
+}
+
+function resetConversationState(customerNumber: string) {
+  whatsappConversations.delete(normalizeCustomerNumber(customerNumber));
+}
+
+function pushWhatsAppLog(entry: WhatsAppLog) {
+  whatsappLogs.push(entry);
+  if (whatsappLogs.length > 250) {
+    whatsappLogs = whatsappLogs.slice(-250);
+  }
+}
+
+function getConnectedWhatsAppNumber() {
+  const socketNumber = whatsappSocket?.user?.id ? whatsappSocket.user.id.split(":")[0] : "";
+  return sessionPhoneNumberFromStore() || socketNumber || "";
+}
+
+async function sessionPhoneNumberFromStore() {
+  const currentSession = await dbAPI.getWhatsAppSession("default");
+  return currentSession?.phoneNumber || "";
+}
+
+function buildCategorySummary(categories: any[], products: any[]) {
+  const grouped = categories.map((category) => {
+    const count = products.filter((product) => product.category === category._id).length;
+    return `${category.name}${count ? ` (${count})` : ""}`;
+  });
+
+  return grouped.length > 0 ? grouped.join("\n") : "No categories available yet.";
+}
+
+function buildCategoryListReply(categories: any[], products: any[], websiteUrl: string) {
+  const lines = categories.length > 0
+    ? categories.map((category, index) => `${index + 1}. ${category.name} - reply with this category name to see products`).join("\n")
+    : ["No categories found in the catalog right now."].join("\n");
+
+  return [
+    "Here are the available product categories:",
+    lines,
+    "",
+    `You can also browse the store here: ${websiteUrl}`
+  ].join("\n");
+}
+
+function buildCategoryProductsReply(category: any, categoryProducts: any[], websiteUrl: string) {
+  const productLines = categoryProducts.length > 0
+    ? categoryProducts.map((product, index) => `${index + 1}. ${product.name} - SKU: ${product.sku}`).join("\n")
+    : "No products are currently assigned to this category.";
+
+  return [
+    `Products in ${category.name}:`,
+    productLines,
+    "",
+    "Reply with the SKU to get full product details.",
+    `Store link: ${websiteUrl}`
+  ].join("\n");
+}
+
+function buildProductDetailsReply(product: any, websiteUrl: string) {
+  return [
+    `Product details for SKU ${product.sku}:`,
+    `Name: ${product.name}`,
+    `Price: $${product.price}`,
+    `Stock: ${product.stock} units`,
+    `Description: ${product.description}`,
+    `Status: ${product.stock > 0 ? "In stock" : "Out of stock"}`,
+    "",
+    `Browse more products: ${websiteUrl}`
+  ].join("\n");
+}
+
+function findMatchingCategory(categories: any[], messageText: string) {
+  const normalized = normalizeLookupText(messageText);
+  return categories.find((category) => {
+    const name = normalizeLookupText(category.name);
+    const slug = normalizeLookupText(category.slug);
+    return normalized === name || normalized.includes(name) || normalized === slug || normalized.includes(slug);
+  }) || null;
+}
+
+function findMatchingSku(products: any[], messageText: string) {
+  const normalized = String(messageText || "").toUpperCase();
+  return products.find((product) => {
+    const sku = String(product.sku || "").toUpperCase();
+    const skuRegex = new RegExp(`\\b${sku.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    return skuRegex.test(normalized) || normalized.includes(sku);
+  }) || null;
+}
+
+async function getBotCatalogReply(incomingText: string, websiteUrl: string, customerNumber: string) {
+  const products = await dbAPI.getProducts();
+  const categories = await dbAPI.getCategories();
+  const conversation = getConversationState(customerNumber);
+  const normalized = normalizeLookupText(incomingText);
+
+  const matchedSkuProduct = findMatchingSku(products, incomingText);
+  if (matchedSkuProduct) {
+    conversation.lastCategorySlug = matchedSkuProduct.category;
+    const category = categories.find((item) => item._id === matchedSkuProduct.category) || null;
+    conversation.lastCategoryName = category?.name;
+    return {
+      reply: buildProductDetailsReply(matchedSkuProduct, websiteUrl),
+      mode: "sku" as WhatsAppReplyMode,
+      productFound: true,
+      matchedSku: matchedSkuProduct.sku,
+      recognizedCode: matchedSkuProduct.sku
+    };
+  }
+
+  const matchedCategory = findMatchingCategory(categories, incomingText);
+  const asksForCategories = /\b(category|categories|available categories|what do you sell|product categories|show categories|all products|product details|list products)\b/i.test(normalized);
+  const asksForProductDetails = /\b(product details|details|show products|available products|catalog|inventory)\b/i.test(normalized);
+
+  if (matchedCategory) {
+    const categoryProducts = products.filter((product) => product.category === matchedCategory._id);
+    conversation.lastCategorySlug = matchedCategory._id;
+    conversation.lastCategoryName = matchedCategory.name;
+    return {
+      reply: buildCategoryProductsReply(matchedCategory, categoryProducts, websiteUrl),
+      mode: "catalog" as WhatsAppReplyMode,
+      productFound: categoryProducts.length > 0,
+      selectedCategory: matchedCategory.name
+    };
+  }
+
+  if (asksForCategories || asksForProductDetails || conversation.geminiRepliesUsed >= whatsappBotSettings.geminiReplyLimit) {
+    return {
+      reply: [
+        buildCategoryListReply(categories, products, websiteUrl),
+        "",
+        "If you already know the product code, send the SKU and I’ll pull the detailed product record."
+      ].join("\n"),
+      mode: "categories" as WhatsAppReplyMode,
+      productFound: false
+    };
+  }
+
+  return null;
+}
+
+async function buildWhatsAppReply(incomingText: string, customerNumber: string, websiteUrl: string, source: string) {
+  const conversation = getConversationState(customerNumber);
+  const catalogReply = await getBotCatalogReply(incomingText, websiteUrl, customerNumber);
+
+  if (catalogReply) {
+    if (catalogReply.mode !== "gemini") {
+      conversation.geminiRepliesUsed = conversation.geminiRepliesUsed;
+    }
+
+    if (catalogReply.mode === "sku") {
+      conversation.geminiRepliesUsed = 0;
+    }
+
+    return {
+      ...catalogReply,
+      action: catalogReply.mode === "sku" ? "sku-details" : catalogReply.mode === "catalog" ? "category-products" : "category-list"
+    };
+  }
+
+  const aiResponse = await getBotResponse(incomingText, websiteUrl);
+  conversation.geminiRepliesUsed += 1;
+
+  return {
+    ...aiResponse,
+    mode: "gemini" as WhatsAppReplyMode,
+    action: aiResponse.productFound ? "gemini-product-reply" : "gemini-reply",
+    source
+  };
+}
+
+function isWhatsAppSocketActive() {
+  return Boolean(whatsappSocket && whatsappSocket?.ws?.readyState !== 3);
+}
+
+async function closeWhatsAppSocket() {
+  if (!whatsappSocket) {
+    return;
+  }
+
+  try {
+    whatsappSocket.ev.removeAllListeners("connection.update");
+    whatsappSocket.ev.removeAllListeners("creds.update");
+    whatsappSocket.ev.removeAllListeners("messages.upsert");
+    await whatsappSocket.end(undefined);
+  } catch (error) {
+    console.warn("WhatsApp socket close warning:", error);
+  } finally {
+    whatsappSocket = null;
+  }
+}
+
+async function resetWhatsAppBridgeState() {
+  whatsappBridgeVersion += 1;
+  whatsappBootstrapPromise = null;
+  if (whatsappReconnectTimer) {
+    clearTimeout(whatsappReconnectTimer);
+    whatsappReconnectTimer = null;
+  }
+  await closeWhatsAppSocket();
+  await dbAPI.clearWhatsAppAuthState("default");
+  await clearWhatsAppAuthDir();
+  await updateWhatsAppSession({
+    connected: false,
+    status: "disconnected",
+    qrCode: "",
+    phoneNumber: ""
+  });
+}
 
 async function ensureWhatsAppAuthDir() {
   await fs.mkdir(whatsappAuthDir, { recursive: true });
@@ -147,14 +395,28 @@ async function startWhatsAppBridge() {
     return whatsappBootstrapPromise;
   }
 
+  if (isWhatsAppSocketActive()) {
+    return;
+  }
+
   whatsappBootstrapPromise = (async () => {
+    const bridgeVersion = whatsappBridgeVersion;
+
     try {
       await ensureWhatsAppAuthDir();
       await hydrateWhatsAppAuthDirFromMongo();
 
+      if (bridgeVersion !== whatsappBridgeVersion) {
+        return;
+      }
+
       const logger = P({ level: "silent" });
       const { state, saveCreds } = await useMultiFileAuthState(whatsappAuthDir);
       startWhatsAppAuthSyncLoop();
+
+      if (bridgeVersion !== whatsappBridgeVersion) {
+        return;
+      }
 
       let version: [number, number, number] = [2, 3000, 1015901307];
       try {
@@ -177,7 +439,16 @@ async function startWhatsAppBridge() {
         browser: ["Shera Sawda", "Chrome", "1.0.0"]
       });
 
+      if (bridgeVersion !== whatsappBridgeVersion) {
+        await closeWhatsAppSocket();
+        return;
+      }
+
       whatsappSocket.ev.on("creds.update", async (...args: any[]) => {
+        if (bridgeVersion !== whatsappBridgeVersion) {
+          return;
+        }
+
         await saveCreds(...args);
         void persistWhatsAppAuthDirToMongo().catch((error) => {
           console.error("WhatsApp auth persistence failure after creds update:", error);
@@ -185,6 +456,10 @@ async function startWhatsAppBridge() {
       });
 
       whatsappSocket.ev.on("messages.upsert", async (event: any) => {
+        if (bridgeVersion !== whatsappBridgeVersion) {
+          return;
+        }
+
         try {
           const whatsappMessage = event?.messages?.[0];
           if (!whatsappMessage || whatsappMessage.key?.fromMe) {
@@ -203,25 +478,31 @@ async function startWhatsAppBridge() {
 
           const customerNumber = remoteJid.split("@")[0];
           const hostHeader = process.env.APP_URL || DEFAULT_APP_URL;
+          const session = await dbAPI.getWhatsAppSession("default");
+          const connectedNumber = session?.phoneNumber || (whatsappSocket?.user?.id ? whatsappSocket.user.id.split(":")[0] : "");
 
           const incomingLog: WhatsAppLog = {
             id: `msg-in-${Date.now()}`,
             timestamp: new Date().toISOString(),
             from: customerNumber,
             message: incomingText,
-            type: "incoming"
+            type: "incoming",
+            connectedNumber,
+            action: "incoming-message"
           };
-          whatsappLogs.push(incomingLog);
+          pushWhatsAppLog(incomingLog);
 
-          whatsappLogs.push({
+          pushWhatsAppLog({
             id: `sys-${Date.now()}-analysing`,
             timestamp: new Date().toISOString(),
             from: "AI Engine",
-            message: `Analyzing incoming text from ${customerNumber}. Fetching Mongoose catalog metrics...`,
-            type: "system"
+            message: `Analyzing incoming text from ${customerNumber}. Connected WhatsApp number: ${connectedNumber || "not connected"}.`,
+            type: "system",
+            connectedNumber,
+            action: "analyzing-message"
           });
 
-          const aiResponse = await getBotResponse(incomingText, hostHeader);
+          const aiResponse = await buildWhatsAppReply(incomingText, customerNumber, hostHeader, "socket");
 
           const outgoingLog: WhatsAppLog = {
             id: `msg-out-${Date.now()}`,
@@ -229,26 +510,33 @@ async function startWhatsAppBridge() {
             from: "AI Bot (Seller)",
             message: aiResponse.reply,
             response: incomingText,
-            type: "outgoing"
+            type: "outgoing",
+            connectedNumber,
+            action: aiResponse.action || (aiResponse.productFound ? "product-reply" : "gemini-reply")
           };
-          whatsappLogs.push(outgoingLog);
+          pushWhatsAppLog(outgoingLog);
 
           if (whatsappSocket) {
             await whatsappSocket.sendMessage(remoteJid, { text: aiResponse.reply });
           }
         } catch (error: any) {
           console.error("WhatsApp message handler failure:", error);
-          whatsappLogs.push({
+          pushWhatsAppLog({
             id: `msg-err-${Date.now()}`,
             timestamp: new Date().toISOString(),
             from: "AI Bot (Seller)",
             message: "কি জানতে চান? কোন product নেবেন সেটার SKU বলুন।",
             type: "outgoing"
+            ,action: "error-fallback"
           });
         }
       });
 
       whatsappSocket.ev.on("connection.update", async (update: any) => {
+        if (bridgeVersion !== whatsappBridgeVersion) {
+          return;
+        }
+
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -314,18 +602,24 @@ async function startWhatsAppBridge() {
         if (connection === "close") {
           const disconnectCode = (lastDisconnect?.error as any)?.output?.statusCode;
           const loggedOut = disconnectCode === DisconnectReason.loggedOut;
-
-          await updateWhatsAppSession({
-            connected: false,
-            status: "disconnected",
-            qrCode: "",
-            phoneNumber: ""
-          });
+          const currentSession = await dbAPI.getWhatsAppSession("default");
 
           if (loggedOut) {
             await dbAPI.clearWhatsAppAuthState("default");
             await clearWhatsAppAuthDir();
+            await updateWhatsAppSession({
+              connected: false,
+              status: "disconnected",
+              qrCode: "",
+              phoneNumber: ""
+            });
           } else {
+            await updateWhatsAppSession({
+              connected: false,
+              status: "connecting",
+              qrCode: currentSession?.qrCode || "",
+              phoneNumber: whatsappSocket?.user?.id ? whatsappSocket.user.id.split(":")[0] : (currentSession?.phoneNumber || "")
+            });
             void persistWhatsAppAuthDirToMongo().catch((error) => {
               console.error("WhatsApp auth persistence failure after close:", error);
             });
@@ -337,18 +631,31 @@ async function startWhatsAppBridge() {
             from: "System",
             message: loggedOut
               ? "WhatsApp session logged out. Scan again to reconnect."
-              : "WhatsApp connection closed. Reconnecting bridge...",
+              : "WhatsApp connection closed. Click Connect to generate a fresh QR code.",
             type: "system"
           });
 
           whatsappSocket = null;
+
           if (!loggedOut) {
-            whatsappBootstrapPromise = null;
-            void startWhatsAppBridge();
+            if (whatsappReconnectTimer) {
+              clearTimeout(whatsappReconnectTimer);
+            }
+
+            whatsappReconnectTimer = setTimeout(() => {
+              whatsappReconnectTimer = null;
+              void startWhatsAppBridge();
+            }, 2500);
+
+            whatsappReconnectTimer.unref?.();
           }
         }
       });
     } catch (error) {
+      if (bridgeVersion !== whatsappBridgeVersion) {
+        return;
+      }
+
       console.error("WhatsApp bridge bootstrap failure:", error);
       whatsappSocket = null;
       await updateWhatsAppSession({
@@ -397,6 +704,7 @@ async function startServer() {
   // Initialize DB asynchronously
   const dbConnected = await connectDB();
   console.log(`Database connected? ${dbConnected ? 'YES' : 'NO'}`);
+  whatsappBotSettings = await dbAPI.getWhatsAppBotSettings("default");
   void startWhatsAppBridge().catch((error) => {
     console.error("Failed to initialize WhatsApp bridge:", error);
   });
@@ -868,8 +1176,65 @@ async function startServer() {
     }
   });
 
+  app.get("/api/whatsapp/bot-settings", async (req, res) => {
+    try {
+      const settings = await dbAPI.getWhatsAppBotSettings("default");
+      whatsappBotSettings = settings;
+      res.json(settings);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed retrieving WhatsApp bot settings" });
+    }
+  });
+
+  app.put("/api/whatsapp/bot-settings", async (req, res) => {
+    try {
+      const geminiReplyLimit = Number(req.body?.geminiReplyLimit);
+      const updated = await dbAPI.updateWhatsAppBotSettings("default", { geminiReplyLimit });
+      whatsappBotSettings = updated;
+      pushWhatsAppLog({
+        id: `log-${Date.now()}-settings`,
+        timestamp: new Date().toISOString(),
+        from: "System",
+        message: `Gemini reply limit updated to ${updated.geminiReplyLimit}.`,
+        type: "system",
+        action: "settings-updated"
+      });
+      res.json(updated);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed updating WhatsApp bot settings" });
+    }
+  });
+
+  app.post("/api/whatsapp/test-gemini", async (req, res) => {
+    try {
+      const message = String(req.body?.message || req.body?.text || "").trim();
+      if (!message) {
+        return res.status(400).json({ error: "Message is required." });
+      }
+
+      const hostHeader = req.headers.host || DEFAULT_APP_URL;
+      const appUrl = process.env.APP_URL || (hostHeader.startsWith("http") ? hostHeader : `https://${hostHeader}`);
+      const response = await getBotResponse(message, appUrl);
+
+      pushWhatsAppLog({
+        id: `log-${Date.now()}-test-gemini`,
+        timestamp: new Date().toISOString(),
+        from: "Admin Test",
+        message,
+        response: response.reply,
+        type: "system",
+        action: response.productFound ? "test-gemini-product-reply" : "test-gemini-reply"
+      });
+
+      res.json({ success: true, ...response });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed testing Gemini" });
+    }
+  });
+
   app.post("/api/whatsapp/connect", async (req, res) => {
     try {
+      await resetWhatsAppBridgeState();
       await updateWhatsAppSession({
         connected: false,
         status: "connecting",
@@ -879,12 +1244,13 @@ async function startServer() {
       await startWhatsAppBridge();
       const updated = await dbAPI.getWhatsAppSession("default");
 
-      whatsappLogs.push({
+      pushWhatsAppLog({
         id: `log-${Date.now()}-1`,
         timestamp: new Date().toISOString(),
         from: "Server",
         message: "Generated live WhatsApp Web QR code. Waiting for WhatsApp scan...",
-        type: "system"
+        type: "system",
+        action: "connection-qr-generated"
       });
 
       res.json(updated || { connected: false, status: "connecting", qrCode: "", phoneNumber: "" });
@@ -921,7 +1287,9 @@ async function startServer() {
         timestamp: new Date().toISOString(),
         from: "System",
         message: `✅ WhatsApp connected successfully to active session (${defaultNumber}). Core listener registered.`,
-        type: "system"
+        type: "system",
+        connectedNumber: defaultNumber,
+        action: "simulate-connection-open"
       });
 
       res.json(updated);
@@ -932,6 +1300,10 @@ async function startServer() {
 
   app.post("/api/whatsapp/disconnect", async (req, res) => {
     try {
+      await closeWhatsAppSocket();
+      await dbAPI.clearWhatsAppAuthState("default");
+      await clearWhatsAppAuthDir();
+
       const session = {
         connected: false,
         status: 'disconnected',
@@ -945,7 +1317,8 @@ async function startServer() {
         timestamp: new Date().toISOString(),
         from: "System",
         message: "Disconnected existing WhatsApp automation bridge.",
-        type: "system"
+        type: "system",
+        action: "connection-closed"
       });
 
       res.json(updated);
@@ -982,25 +1355,32 @@ async function startServer() {
     try {
       const hostHeader = req.headers.host || DEFAULT_APP_URL;
       const appUrl = process.env.APP_URL || (hostHeader.startsWith("http") ? hostHeader : `https://${hostHeader}`);
+      const session = await dbAPI.getWhatsAppSession("default");
+      const connectedNumber = session?.phoneNumber || "";
+      const customerNumber = normalizeCustomerNumber(from);
 
       const incomingLog: WhatsAppLog = {
         id: `msg-in-${Date.now()}`,
         timestamp: new Date().toISOString(),
-        from,
+        from: customerNumber || from,
         message,
-        type: 'incoming'
+        type: 'incoming',
+        connectedNumber,
+        action: "incoming-message"
       };
-      whatsappLogs.push(incomingLog);
+      pushWhatsAppLog(incomingLog);
 
-      whatsappLogs.push({
+      pushWhatsAppLog({
         id: `sys-${Date.now()}-analysing`,
         timestamp: new Date().toISOString(),
         from: "AI Engine",
-        message: `Analyzing incoming text from ${from}. Fetching Mongoose catalog metrics...`,
-        type: "system"
+        message: `Analyzing incoming text from ${customerNumber || from}. Connected WhatsApp number: ${connectedNumber || "not connected"}.`,
+        type: "system",
+        connectedNumber,
+        action: "analyzing-message"
       });
 
-      const aiResponse = await getBotResponse(message, appUrl);
+      const aiResponse = await buildWhatsAppReply(message, customerNumber || from, appUrl, "simulator");
 
       const outgoingLog: WhatsAppLog = {
         id: `msg-out-${Date.now()}`,
@@ -1008,12 +1388,14 @@ async function startServer() {
         from: "AI Bot (Seller)",
         message: aiResponse.reply,
         response: message,
-        type: 'outgoing'
+        type: 'outgoing',
+        connectedNumber,
+        action: aiResponse.action || (aiResponse.productFound ? "product-reply" : "gemini-reply")
       };
-      whatsappLogs.push(outgoingLog);
+      pushWhatsAppLog(outgoingLog);
 
       if (whatsappSocket) {
-        const normalizedFrom = from.replace(/[^\d]/g, "");
+        const normalizedFrom = compactNumber(from);
         const remoteJid = normalizedFrom ? `${normalizedFrom}@s.whatsapp.net` : from;
         await whatsappSocket.sendMessage(remoteJid, { text: aiResponse.reply });
       }
@@ -1025,7 +1407,9 @@ async function startServer() {
         metadata: {
           matchedSku: aiResponse.matchedSku,
           recognizedCode: aiResponse.recognizedCode,
-          productFound: aiResponse.productFound
+          productFound: aiResponse.productFound,
+          action: aiResponse.action,
+          connectedNumber
         }
       });
 
@@ -1037,9 +1421,10 @@ async function startServer() {
         from: "AI Bot (Seller)",
         message: "Pardon me, I encountered a database lookup latency. Could you please resend the model code?",
         response: message,
-        type: 'outgoing'
+        type: 'outgoing',
+        action: "error-fallback"
       };
-      whatsappLogs.push(errLog);
+      pushWhatsAppLog(errLog);
       res.json({ success: false, reply: errLog.message });
     }
   });

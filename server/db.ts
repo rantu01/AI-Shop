@@ -140,6 +140,16 @@ const WhatsAppAuthStateSchema = new Schema<IWhatsAppAuthStateDoc>({
   files: { type: Schema.Types.Mixed, required: true, default: {} }
 }, { timestamps: true });
 
+export interface IWhatsAppBotSettingsDoc extends Document {
+  sessionId: string;
+  geminiReplyLimit: number;
+}
+
+const WhatsAppBotSettingsSchema = new Schema<IWhatsAppBotSettingsDoc>({
+  sessionId: { type: String, required: true, unique: true, index: true },
+  geminiReplyLimit: { type: Number, required: true, default: 4 }
+}, { timestamps: true });
+
 export let CategoryModel: mongoose.Model<ICategoryDoc>;
 export let ProductModel: mongoose.Model<IProductDoc>;
 export let OrderModel: mongoose.Model<IOrderDoc>;
@@ -147,6 +157,7 @@ export let UserProfileModel: mongoose.Model<IUserProfileDoc>;
 export let SmsModel: mongoose.Model<ISmsDoc>;
 export let WhatsAppSessionModel: mongoose.Model<IWhatsAppSessionDoc>;
 export let WhatsAppAuthStateModel: mongoose.Model<IWhatsAppAuthStateDoc>;
+export let WhatsAppBotSettingsModel: mongoose.Model<IWhatsAppBotSettingsDoc>;
 
 
 let isMongoConnected = false;
@@ -159,6 +170,9 @@ let inMemoryProfiles: UserProfile[] = [];
 let inMemorySmsMessages: Array<{ _id: string; amount: number; sender: string; trxId: string; dateTime: string; status: 'Unused' | 'Used'; message: string; payload: any; createdAt: string }> = [];
 let inMemoryWhatsAppSession: any = { connected: false, status: 'disconnected', qrCode: '', phoneNumber: '' };
 let inMemoryWhatsAppAuthState: Record<string, Record<string, string>> = {};
+let inMemoryWhatsAppBotSettings: Record<string, { sessionId: string; geminiReplyLimit: number }> = {
+  default: { sessionId: 'default', geminiReplyLimit: 4 }
+};
 
 export async function connectDB() {
   const uri = process.env.MONGODB_URI;
@@ -184,6 +198,7 @@ export async function connectDB() {
     SmsModel = mongoose.models.Sms || mongoose.model<ISmsDoc>('Sms', SmsSchema, 'sms');
     WhatsAppSessionModel = mongoose.models.WhatsAppSession || mongoose.model<IWhatsAppSessionDoc>('WhatsAppSession', WhatsAppSessionSchema);
     WhatsAppAuthStateModel = mongoose.models.WhatsAppAuthState || mongoose.model<IWhatsAppAuthStateDoc>('WhatsAppAuthState', WhatsAppAuthStateSchema);
+    WhatsAppBotSettingsModel = mongoose.models.WhatsAppBotSettings || mongoose.model<IWhatsAppBotSettingsDoc>('WhatsAppBotSettings', WhatsAppBotSettingsSchema);
 
     await SmsModel.init();
 
@@ -1035,6 +1050,51 @@ export const dbAPI = {
     }
 
     delete inMemoryWhatsAppAuthState[sessionId];
+  },
+
+  async getWhatsAppBotSettings(sessionId: string): Promise<{ sessionId: string; geminiReplyLimit: number }> {
+    if (isMongoConnected && WhatsAppBotSettingsModel) {
+      try {
+        const doc = await WhatsAppBotSettingsModel.findOne({ sessionId });
+        if (doc) {
+          return {
+            sessionId: doc.sessionId,
+            geminiReplyLimit: Number(doc.geminiReplyLimit) || 4
+          };
+        }
+      } catch (err) {
+        console.error("MongoDB getWhatsAppBotSettings error:", err);
+      }
+    }
+
+    return inMemoryWhatsAppBotSettings[sessionId] || { sessionId, geminiReplyLimit: 4 };
+  },
+
+  async updateWhatsAppBotSettings(sessionId: string, data: { geminiReplyLimit?: number }): Promise<{ sessionId: string; geminiReplyLimit: number }> {
+    const cleanSettings = {
+      sessionId,
+      geminiReplyLimit: Math.max(1, Math.min(10, Number(data.geminiReplyLimit) || 4))
+    };
+
+    if (isMongoConnected && WhatsAppBotSettingsModel) {
+      try {
+        const doc = await WhatsAppBotSettingsModel.findOneAndUpdate(
+          { sessionId },
+          cleanSettings,
+          { new: true, upsert: true }
+        );
+
+        return {
+          sessionId: doc.sessionId,
+          geminiReplyLimit: Number(doc.geminiReplyLimit) || 4
+        };
+      } catch (err) {
+        console.error("MongoDB updateWhatsAppBotSettings error:", err);
+      }
+    }
+
+    inMemoryWhatsAppBotSettings[sessionId] = cleanSettings;
+    return cleanSettings;
   },
 
   async updateSmsStatusByTrxId(trxId: string, status: 'Unused' | 'Used'): Promise<any | null> {

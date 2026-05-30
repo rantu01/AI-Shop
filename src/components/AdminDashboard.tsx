@@ -96,6 +96,11 @@ export default function AdminDashboard({
   const [loadingSession, setLoadingSession] = useState(false);
   const [loadingLogs, setLoadingLogs] = useState(false);
   const [simPhoneNumber, setSimPhoneNumber] = useState("+1 (555) 728-1920");
+  const [geminiTestMessage, setGeminiTestMessage] = useState("");
+  const [geminiTestReply, setGeminiTestReply] = useState("");
+  const [geminiReplyLimit, setGeminiReplyLimit] = useState(4);
+  const [botSettingsLoading, setBotSettingsLoading] = useState(false);
+  const [botSettingsSaving, setBotSettingsSaving] = useState(false);
 
   // Interactive Simulator chat console
   const [simCustomerMsg, setSimCustomerMsg] = useState("");
@@ -113,9 +118,11 @@ export default function AdminDashboard({
     if (user && user.isAdmin) {
       fetchSessionStatus();
       fetchLogs();
+      fetchBotSettings();
       const interval = setInterval(() => {
         fetchLogs();
         fetchSessionStatus();
+        fetchBotSettings();
       }, 5000);
       return () => clearInterval(interval);
     }
@@ -137,19 +144,89 @@ export default function AdminDashboard({
     try {
       const res = await fetch("/api/whatsapp/status");
       const data = await res.json();
-      setSession(data);
+      setSession((prev) => {
+        if (data?.connected) {
+          return data;
+        }
+
+        const shouldPreserveQr = Boolean(prev.qrCode) && prev.status === 'connecting' && (data?.status === 'disconnected' || data?.status === 'connecting');
+        const nextSession = {
+          ...prev,
+          ...data,
+          qrCode: shouldPreserveQr ? prev.qrCode : (data?.qrCode ?? prev.qrCode),
+          phoneNumber: data?.phoneNumber ?? prev.phoneNumber,
+          status: shouldPreserveQr ? 'connecting' : (data?.status ?? prev.status)
+        };
+
+        return nextSession;
+      });
     } catch (e) {
       console.error("Failed to fetch session", e);
     }
   };
 
   const fetchLogs = async () => {
+    setLoadingLogs(true);
     try {
       const res = await fetch("/api/whatsapp/logs");
       const data = await res.json();
       setLogs(data);
     } catch (e) {
       console.error("Failed to logs", e);
+    } finally {
+      setLoadingLogs(false);
+    }
+  };
+
+  const fetchBotSettings = async () => {
+    setBotSettingsLoading(true);
+    try {
+      const res = await fetch("/api/whatsapp/bot-settings");
+      const data = await res.json();
+      if (typeof data?.geminiReplyLimit === "number") {
+        setGeminiReplyLimit(data.geminiReplyLimit);
+      }
+    } catch (e) {
+      console.error("Failed to fetch bot settings", e);
+    } finally {
+      setBotSettingsLoading(false);
+    }
+  };
+
+  const handleSaveBotSettings = async () => {
+    setBotSettingsSaving(true);
+    try {
+      const res = await fetch("/api/whatsapp/bot-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ geminiReplyLimit: Number(geminiReplyLimit) })
+      });
+
+      if (res.ok) {
+        await fetchLogs();
+      }
+    } catch (e) {
+      console.error("Failed to save bot settings", e);
+    } finally {
+      setBotSettingsSaving(false);
+    }
+  };
+
+  const handleTestGemini = async () => {
+    if (!geminiTestMessage.trim()) return;
+
+    try {
+      const res = await fetch("/api/whatsapp/test-gemini", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: geminiTestMessage })
+      });
+      const data = await res.json();
+      setGeminiTestReply(data.reply || data.error || "No response returned.");
+      fetchLogs();
+    } catch (e) {
+      console.error("Failed Gemini test", e);
+      setGeminiTestReply("Gemini test failed.");
     }
   };
 
@@ -890,387 +967,304 @@ export default function AdminDashboard({
 
       {/* 4. AI WHATSAPP BOT AUTOMATION TAB CONTENT */}
       {activeTab === 'automation' && (
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-8">
-          
-          {/* Left Block UI: Connection Portal (Span 5) */}
-          <div className="xl:col-span-5 flex flex-col gap-6">
-            
-            {/* Connection state control hub */}
-            <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-6">
-              <div className="flex items-center justify-between">
+        <div className="mx-auto max-w-6xl space-y-6">
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
                 <h3 className="font-display text-base font-bold text-slate-900 flex items-center gap-2">
                   <Smartphone className="h-5 w-5 text-indigo-500" />
-                  <span>Baileys Gateway Console</span>
+                  <span>WhatsApp Linking</span>
                 </h3>
                 <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[10px] font-bold ${
-                  session.connected 
-                    ? "bg-emerald-50 text-emerald-800 border border-emerald-200" 
-                    : session.status === 'connecting' 
-                      ? "bg-amber-50 text-amber-800 border border-amber-200 animate-pulse" 
+                  session.connected
+                    ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
+                    : session.status === 'connecting'
+                      ? "bg-amber-50 text-amber-800 border border-amber-200 animate-pulse"
                       : "bg-rose-50 text-rose-800 border border-rose-200"
                 }`}>
                   {session.connected ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
-                  <span>
-                    {session.connected 
-                      ? "CONNECTED (AUTHENTICATED)" 
-                      : session.status === 'connecting' 
-                        ? "CONNECTING..." 
-                        : "DISCONNECTED (SHOW QR CODE)"}
-                  </span>
+                  <span>{session.connected ? "CONNECTED" : session.status === 'connecting' ? "CONNECTING" : "DISCONNECTED"}</span>
                 </span>
               </div>
 
-              {/* Status explanation */}
-              <p className="text-xs text-slate-500 leading-normal">
-                Generates a secure dynamic connection session. Scanning the QR code binds your WhatsApp device, allowing the Gemini Sales Agent to listen and respond using MongoDB.
-              </p>
-
-              {/* Sandbox Warning Notice */}
-              <div className="bg-amber-50/80 border border-amber-200 text-amber-900 rounded-2xl p-4 space-y-2.5 shadow-sm">
-                <div className="flex items-start gap-2.5">
-                  <span className="text-lg shrink-0 mt-0.5">⚠️</span>
-                  <div>
-                    <h4 className="text-xs font-bold text-amber-800 uppercase tracking-wider">WhatsApp Linked Device Guidelines:</h4>
-                    <p className="text-[11px] text-amber-900/95 leading-relaxed mt-1 font-medium">
-                      এই QR কোডটি এখন একটি <strong>লাইভ WhatsApp Web linking QR</strong>। আপনার মোবাইল WhatsApp এর <strong>Linked devices</strong> দিয়ে স্ক্যান করলে session connect হবে, invalid code দেখাবে না.
-                    </p>
-                    <p className="text-[11px] text-amber-900/95 leading-relaxed mt-2 font-medium">
-                      <strong>✅ কীভাবে কানেক্ট করবেন (How to Connect):</strong> নিচের QR টি <strong>WhatsApp &gt; Linked devices &gt; Link a device</strong> দিয়ে স্ক্যান করুন। স্ক্যান সফল হলে session status <strong>"CONNECTED"</strong> হবে। Demo button শুধু sandbox fallback হিসেবে রাখা আছে.
-                    </p>
-                    <div className="border-t border-amber-200/50 pt-2 mt-2 text-[10px] text-amber-700 font-sans italic leading-normal">
-                      Note: This QR is for linked-device login, not a normal WhatsApp chat link. Use the simulator only if you need to fake a connected session for testing.
+              <div className="mt-6 flex flex-col items-center gap-5">
+                <div className="min-h-40 flex items-center justify-center">
+                  {session.connected ? (
+                    <div className="flex flex-col items-center gap-3 text-center">
+                      <CheckCircle className="h-10 w-10 text-emerald-600" />
+                      <div>
+                        <p className="text-sm font-bold text-slate-900">WhatsApp connected</p>
+                        <p className="mt-1 text-xs font-mono text-slate-500">
+                          {session.phoneNumber ? session.phoneNumber : "Connected number not reported yet"}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* QR Code Presentation Panel */}
-              {session.status === 'disconnected' && (
-                <div className="flex flex-col items-center space-y-4 p-5 border border-slate-200 bg-slate-50 rounded-2xl">
-                  <div className="text-center space-y-0.5">
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2 py-0.5 text-[9px] font-extrabold text-rose-700 border border-rose-100 uppercase tracking-widest">
-                      🔴 Disconnected (Show QR Code)
-                    </span>
-                    <h4 className="text-xs font-bold text-slate-800">Scan Below or Initialize Connection</h4>
-                    <p className="text-[10px] text-slate-400">Scan this QR directly to synchronize authenticated sessions.</p>
-                  </div>
-
-                  {/* Visual QR IMG code block shown immediately */}
-                  <div className="p-4 bg-white rounded-xl shadow-md border border-slate-100 ring-4 ring-slate-100">
-                    {session.qrCode && session.qrCode.startsWith("data:") ? (
-                      <img 
-                        src={session.qrCode} 
-                        alt="WhatsApp QR Code" 
-                        className="h-40 w-40 object-contain mx-auto block font-sans"
-                        style={{ imageRendering: 'pixelated' }}
-                      />
-                    ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="160" height="160" className="mx-auto block" style={{ background: '#fff' }}>
-                        <rect x="0" y="0" width="30" height="30" fill="#030712"/>
-                        <rect x="5" y="5" width="20" height="20" fill="#fff"/>
-                        <rect x="10" y="10" width="10" height="10" fill="#030712"/>
-                        <rect x="70" y="0" width="30" height="30" fill="#030712"/>
-                        <rect x="75" y="5" width="20" height="20" fill="#fff"/>
-                        <rect x="80" y="10" width="10" height="10" fill="#030712"/>
-                        <rect x="0" y="70" width="30" height="30" fill="#030712"/>
-                        <rect x="5" y="75" width="20" height="20" fill="#fff"/>
-                        <rect x="10" y="80" width="10" height="10" fill="#030712"/>
-                        <rect x="40" y="40" width="20" height="20" fill="#030712"/>
-                        <rect x="45" y="45" width="10" height="10" fill="#fff"/>
-                        <rect x="75" y="40" width="15" height="15" fill="#030712"/>
-                        <rect x="40" y="10" width="15" height="15" fill="#030712"/>
-                        <rect x="15" y="45" width="15" height="15" fill="#030712"/>
-                        <rect x="70" y="70" width="30" height="30" fill="#030712"/>
-                        <rect x="75" y="75" width="20" height="20" fill="#fff"/>
-                        <rect x="85" y="85" width="5" height="5" fill="#030712"/>
-                      </svg>
-                    )}
-                  </div>
-
-                  <div className="flex gap-2 w-full justify-center">
-                    <button
-                      onClick={handleGenerateQR}
-                      disabled={loadingSession}
-                      className="rounded-xl bg-slate-800 px-4 py-2.5 text-xs font-bold text-white shadow-md hover:bg-slate-900 transition-colors disabled:opacity-50"
-                      id="generate-qr-btn"
-                    >
-                      {loadingSession ? "Generating Live Session..." : "Initialize WA Connection"}
-                    </button>
-                  </div>
-
-                  {/* Scan Simulator nested right in state */}
-                  <div className="border-t border-slate-200/60 pt-4 w-full flex flex-col gap-2">
-                    <span className="text-[9px] font-bold text-slate-400 text-center uppercase tracking-widest leading-none">Sandbox Scan Bind</span>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        placeholder="Sim Phone e.g. +8801814293906"
-                        value={simPhoneNumber}
-                        onChange={(e) => setSimPhoneNumber(e.target.value)}
-                        className="rounded-lg border bg-white border-slate-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-500 text-center flex-1 font-mono font-bold"
-                      />
-                      <button
-                        onClick={handleSimulateScan}
-                        className="rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 whitespace-nowrap transition-colors"
-                        id="dev-scan-sim"
-                      >
-                        Simulate QR Scan
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {session.status === 'connecting' && (
-                <div className="flex flex-col items-center space-y-4 p-5 border border-indigo-150 bg-indigo-50/20 rounded-2xl">
-                  <div className="text-center space-y-0.5">
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2 py-0.5 text-[9px] font-extrabold text-amber-700 border border-amber-100 uppercase tracking-widest animate-pulse">
-                      ⚡ Connecting...
-                    </span>
-                    <h4 className="text-xs font-bold text-slate-800">Scan Live Secure QR Code</h4>
-                    <p className="text-[10px] text-slate-400">Device authorization token pending scanner handshake.</p>
-                  </div>
-
-                  {/* Visual QR Insertion */}
-                  {session.qrCode ? (
-                    <div className="p-4 bg-white rounded-xl shadow-md border border-slate-100 ring-4 ring-indigo-50">
-                      {session.qrCode.startsWith("data:") ? (
-                        <img 
-                          src={session.qrCode} 
-                          alt="WhatsApp QR Code" 
-                          className="h-40 w-40 object-contain mx-auto block font-sans"
-                          style={{ imageRendering: 'pixelated' }}
-                        />
-                      ) : (
-                        <div 
-                          dangerouslySetInnerHTML={{ __html: session.qrCode }}
-                          className="mx-auto block"
-                        />
-                      )}
-                    </div>
+                  ) : session.qrCode && session.qrCode.startsWith("data:") ? (
+                    <img
+                      src={session.qrCode}
+                      alt="WhatsApp QR Code"
+                      className="h-48 w-48 object-contain block"
+                      style={{ imageRendering: 'pixelated' }}
+                    />
                   ) : (
-                    <div className="h-40 w-40 rounded-xl bg-white border border-slate-100 shadow flex items-center justify-center">
-                      <div className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-600 border-t-transparent"></div>
+                    <div className="h-48 w-48 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center">
+                      <div className="h-6 w-6 animate-spin rounded-full border-2 border-indigo-600 border-t-transparent" />
                     </div>
                   )}
-
-                  {/* Sandbox Scan simulator helper */}
-                  <div className="border-t border-slate-200/60 pt-4 w-full flex flex-col gap-2">
-                    <span className="text-[9px] font-bold text-slate-400 text-center uppercase tracking-widest leading-none">Sandbox Scan Bind</span>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        placeholder="Sim Phone e.g. +8801814293906"
-                        value={simPhoneNumber}
-                        onChange={(e) => setSimPhoneNumber(e.target.value)}
-                        className="rounded-lg border bg-white border-slate-200 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-500 text-center flex-1 font-mono font-bold"
-                      />
-                      <button
-                        onClick={handleSimulateScan}
-                        className="rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 whitespace-nowrap transition-colors"
-                        id="dev-scan-sim-connecting"
-                      >
-                        Simulate QR Scan
-                      </button>
-                    </div>
-                  </div>
                 </div>
-              )}
 
-              {session.connected && (
-                <div className="flex flex-col items-center justify-center border border-emerald-100 bg-emerald-50/10 rounded-2xl py-8 p-5 text-center space-y-4">
-                  <div className="h-10 w-10 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shadow-sm animate-bounce">
-                    <CheckCircle className="h-6 w-6" />
+                <div className="grid w-full grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Connected number</p>
+                    <p className="mt-1 font-mono text-sm font-semibold text-slate-900 break-all">
+                      {session.phoneNumber || "Not connected"}
+                    </p>
                   </div>
-                  <div>
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2.5 py-0.5 text-[9px] font-extrabold text-emerald-800 uppercase tracking-widest mb-1.5">
-                      ✓ Connected (Authenticated)
-                    </span>
-                    <h4 className="text-sm font-bold text-slate-800">Connection Standard Secured</h4>
-                    <p className="text-xs text-slate-600 font-mono font-bold text-indigo-600 mt-1">{session.phoneNumber}</p>
-                  </div>
-
-                  <p className="text-[10px] text-slate-500 max-w-xs leading-normal">
-                    AI agent is currently monitoring and responding live in-memory using actual Mongoose schemas. Take operations and send webhook logs!
-                  </p>
-
-                  <button
-                    onClick={handleDisconnectWhatsApp}
-                    className="rounded-xl border border-red-200 text-red-600 bg-red-50/50 hover:bg-red-50 hover:border-red-300 px-4 py-2 text-xs font-bold transition-all"
-                  >
-                    Disconnect Channel
-                  </button>
-                </div>
-              )}
-
-            </div>
-
-            {/* Quick configuration specs sheet */}
-            <div className="bg-slate-900 rounded-3xl p-5 text-white space-y-3.5 border border-slate-800">
-              <h4 className="font-display text-xs font-bold uppercase tracking-widest text-slate-500 flex items-center gap-1">
-                <Database className="h-3.5 w-3.5" />
-                <span>Integration Flow Guide</span>
-              </h4>
-              <p className="text-[11px] leading-relaxed text-slate-400">
-                Incoming users triggers `/api/whatsapp/simulate-incoming`.
-              </p>
-              <div className="text-[10px] space-y-2 border-t border-slate-800 pt-3 text-slate-400">
-                <p className="flex items-start gap-1"><ChevronRight className="h-3.5 w-3.5 text-indigo-400 shrink-0 mt-0.5" /> <span><strong>Product SKU Lookup:</strong> Bot programmatically queries products to see if SKU pattern triggers.</span></p>
-                <p className="flex items-start gap-1"><ChevronRight className="h-3.5 w-3.5 text-indigo-400 shrink-0 mt-0.5" /> <span><strong>Incorrect Code Reply:</strong> Strict fallback matches invalid attempted formatting to redirect visitors to website.</span></p>
-                <p className="flex items-start gap-1"><ChevronRight className="h-3.5 w-3.5 text-indigo-400 shrink-0 mt-0.5" /> <span><strong>General Queries:</strong> If no code found, Gemini prompts nicely for Product Code and shows examples.</span></p>
-              </div>
-            </div>
-
-          </div>
-
-          {/* Right Block UI: Console (logs + live interactive chat simulator) (Span 7) */}
-          <div className="xl:col-span-7 flex flex-col gap-6">
-            
-            {/* Interactive WhatsApp Multi-user Simulator Panel */}
-            <div className="bg-white rounded-3xl border border-slate-200 shadow-sm flex flex-col h-[400px]">
-              
-              {/* Simulator Header */}
-              <div className="bg-[#075e54] text-white p-4 rounded-t-3xl flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="h-8 w-8 rounded-full bg-slate-900/15 flex items-center justify-center text-white text-xs font-extrabold shadow-sm">
-                    {session.connected ? "WA" : "❌"}
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold leading-none flex items-center gap-2">
-                      <span>Simulated Customer Chat Widget</span>
-                      <span className="bg-[#128c7e] px-1.5 py-0.5 text-[8px] rounded">SIMULATOR</span>
-                    </h4>
-                    <p className="text-[10px] text-teal-100 mt-1">
-                      {session.connected 
-                        ? `Live Bridge: Connected via ${session.phoneNumber}` 
-                        : "Connect WhatsApp gateway to test live chats!"
-                      }
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Reply mode</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">
+                      Gemini replies first, then product catalog fallback
                     </p>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <label className="text-[10px] text-teal-100 font-bold hidden sm:inline">User Mobile:</label>
-                  <input
-                    type="text"
-                    value={simCustomerPhone}
-                    onChange={(e) => setSimCustomerPhone(e.target.value)}
-                    className="bg-[#128c7e] border-none text-white rounded px-2 py-0.5 text-[10px] font-mono w-24 outline-none focus:ring-1 focus:ring-emerald-300"
-                    title="Simulate customer phone number"
-                  />
-                </div>
-              </div>
-
-              {/* Chat Viewport Area */}
-              <div className="flex-1 overflow-y-auto p-4 bg-[#e5ddd5] space-y-3 flex flex-col custom-scrollbar">
-                {simulatorChat.map((msg, idx) => {
-                  if (msg.sender === 'system') {
-                    return (
-                      <div key={idx} className="self-center bg-yellow-100/90 text-yellow-800 text-[10px] font-semibold rounded px-4 py-1 border border-yellow-200 text-center shadow-xs">
-                        {msg.text}
-                      </div>
-                    );
-                  }
-
-                  const isBot = msg.sender === 'bot';
-                  return (
-                    <div 
-                      key={idx} 
-                      className={`max-w-[85%] rounded-xl px-3.5 py-2 text-xs shadow-sm leading-relaxed whitespace-pre-wrap ${
-                        isBot 
-                          ? "self-start bg-white text-slate-800 border-l-4 border-indigo-500 rounded-tl-none" 
-                          : "self-end bg-[#dcf8c6] text-slate-800 rounded-tr-none"
-                      }`}
-                    >
-                      {isBot && (
-                        <div className="flex items-center gap-1 mb-1 text-slate-400 font-bold text-[9px] uppercase tracking-wide">
-                          <Bot className="h-3 w-3 text-indigo-500" />
-                          <span>Gemini Seller (AI)</span>
-                        </div>
-                      )}
-                      <div>{msg.text}</div>
-                      <p className="text-right text-[8px] text-slate-400 mt-1">{msg.timestamp}</p>
-                    </div>
-                  );
-                })}
-                <div ref={chatEndRef} />
-              </div>
-
-              {/* Chat Input Area */}
-              <form onSubmit={handleSendSimultedMsg} className="p-3 border-t border-slate-100 bg-slate-50 rounded-b-3xl">
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    disabled={!session.connected || chatSubmitting}
-                    placeholder={session.connected ? "Type message as a customer... e.g. Do you sell Studio Headphones?" : "Activate WhatsApp session above to chat..."}
-                    value={simCustomerMsg}
-                    onChange={(e) => setSimCustomerMsg(e.target.value)}
-                    className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs outline-none focus:border-[#075e54] disabled:bg-slate-100"
-                    id="sim-chat-msg-input"
-                  />
+                {!session.connected ? (
                   <button
-                    type="submit"
-                    disabled={!session.connected || !simCustomerMsg.trim() || chatSubmitting}
-                    className="rounded-xl bg-[#075e54] text-white p-2.5 px-4 shadow hover:bg-[#128c7e] transition-all disabled:opacity-45"
-                    id="sim-chat-msg-send"
+                    onClick={handleGenerateQR}
+                    disabled={loadingSession}
+                    className="rounded-xl bg-slate-900 px-5 py-3 text-xs font-bold text-white shadow-md hover:bg-black transition-colors disabled:opacity-50"
+                    id="generate-qr-btn"
                   >
-                    <Send className="h-4 w-4" />
+                    {loadingSession ? "Generating..." : "Initialize WA Connection"}
                   </button>
-                </div>
-              </form>
-
+                ) : (
+                  <button
+                    onClick={handleDisconnectWhatsApp}
+                    className="rounded-xl border border-slate-200 bg-white px-5 py-3 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                  >
+                    Disconnect
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* Server reasoning scrolling Activity logs */}
-            <div className="bg-slate-950 text-slate-300 rounded-3xl p-5 border border-slate-800 shadow-lg flex flex-col h-[320px]">
-              <div className="flex justify-between items-center border-b border-slate-800 pb-3 mb-3 shrink-0">
+            <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-5">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="font-display text-base font-bold text-slate-900 flex items-center gap-2">
+                  <Sparkles className="h-5 w-5 text-indigo-500" />
+                  <span>Gemini Controls</span>
+                </h3>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  {botSettingsLoading ? "Loading settings..." : "Live settings"}
+                </span>
+              </div>
+
+              <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4">
                 <div>
-                  <h4 className="font-display text-xs font-bold uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
-                    <span className="h-2 w-2 rounded-full bg-indigo-500 animate-pulse"></span>
-                    <span>Live AI Debug Reasoning Logs</span>
-                  </h4>
-                  <p className="text-[9px] text-slate-600 mt-0.5">Refreshed programmatically inside Cloud Container</p>
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                    Gemini reply limit before catalog fallback
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    value={geminiReplyLimit}
+                    onChange={(e) => setGeminiReplyLimit(Number(e.target.value))}
+                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2 text-xs outline-none focus:border-indigo-500 bg-white focus:bg-white text-slate-800"
+                    id="gemini-reply-limit-input"
+                  />
                 </div>
+
                 <button
-                  onClick={handleClearLogs}
-                  className="rounded bg-slate-800 hover:bg-slate-700 hover:text-white px-2.5 py-1 text-[9px] font-mono text-slate-400 transition-colors"
+                  type="button"
+                  onClick={handleSaveBotSettings}
+                  disabled={botSettingsSaving}
+                  className="rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                  id="save-bot-settings-btn"
                 >
-                  Clear logs
+                  {botSettingsSaving ? "Saving..." : "Save Gemini Limit"}
                 </button>
               </div>
 
-              {/* Scroll viewport */}
-              <div className="flex-1 overflow-y-auto font-mono text-[10px] space-y-2.5 custom-scrollbar pr-2">
-                {logs.map((log) => {
-                  const dateStr = new Date(log.timestamp).toLocaleTimeString();
-                  
-                  return (
-                    <div key={log.id} className="border-b border-slate-900/40 pb-2">
-                      <div className="flex justify-between text-[8px] text-slate-600 font-semibold mb-0.5">
-                        <span>STAMP: {dateStr}</span>
-                        <span>SENDER: {log.from}</span>
-                      </div>
-                      <div className="flex gap-2">
-                        {log.type === 'incoming' && (
-                          <span className="text-amber-500 font-bold">▶ [INCOMING]</span>
-                        )}
-                        {log.type === 'outgoing' && (
-                          <span className="text-emerald-500 font-bold">◀ [AI BOT]</span>
-                        )}
-                        {log.type === 'system' && (
-                          <span className="text-indigo-400 font-bold">● [ENGINE]</span>
-                        )}
-                        <span className="text-slate-300 break-words whitespace-pre-wrap">{log.message}</span>
+              <div className="space-y-3 rounded-2xl border border-slate-200 p-4">
+                <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
+                  <MessageSquare className="h-4 w-4 text-indigo-500" />
+                  <span>Test Gemini</span>
+                </div>
+                <textarea
+                  rows={4}
+                  value={geminiTestMessage}
+                  onChange={(e) => setGeminiTestMessage(e.target.value)}
+                  placeholder="Type a product question to test the Gemini response directly..."
+                  className="w-full rounded-xl border border-slate-200 px-3.5 py-2 text-xs outline-none focus:border-indigo-500 bg-slate-50 focus:bg-white"
+                  id="gemini-test-input"
+                />
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <button
+                    type="button"
+                    onClick={handleTestGemini}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-bold text-white hover:bg-black transition-colors"
+                    id="gemini-test-submit"
+                  >
+                    <Play className="h-3.5 w-3.5" />
+                    Run Test
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGeminiTestMessage("");
+                      setGeminiTestReply("");
+                    }}
+                    className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50 transition-colors"
+                  >
+                    Clear
+                  </button>
+                </div>
+                <div className="rounded-2xl bg-slate-950 p-4 text-xs text-slate-100 min-h-24">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">Latest Gemini reply</p>
+                  <p className="whitespace-pre-wrap leading-6">{geminiTestReply || "No Gemini test has been run yet."}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-display text-base font-bold text-slate-900">Live WhatsApp Logs</h3>
+                  <p className="text-xs text-slate-500">Shows every inbound message, reply decision, and connected number.</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={fetchLogs}
+                    className="rounded-xl border border-slate-200 px-3 py-2 text-[10px] font-bold text-slate-700 hover:bg-slate-50"
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearLogs}
+                    className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[10px] font-bold text-rose-700 hover:bg-rose-100"
+                  >
+                    Clear Logs
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+                Current connected WhatsApp number: <span className="font-mono font-bold text-slate-900">{session.phoneNumber || "Not connected"}</span>
+              </div>
+
+              <div className="max-h-[34rem] overflow-y-auto space-y-3 pr-1">
+                {loadingLogs ? (
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">Loading logs...</div>
+                ) : logs.length === 0 ? (
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">No live logs yet.</div>
+                ) : (
+                  logs.map((log) => (
+                    <div key={log.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-bold text-slate-900">{log.from}</p>
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+                              log.type === 'incoming'
+                                ? 'bg-amber-50 text-amber-800'
+                                : log.type === 'outgoing'
+                                  ? 'bg-indigo-50 text-indigo-700'
+                                  : 'bg-slate-100 text-slate-600'
+                            }`}>
+                              {log.type}
+                            </span>
+                            {log.action && (
+                              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                                {log.action}
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-2 whitespace-pre-wrap text-xs leading-6 text-slate-700">{log.message}</p>
+                          {log.response && (
+                            <p className="mt-2 rounded-xl bg-slate-50 p-3 text-[11px] leading-5 text-slate-600">
+                              Reply to: <span className="font-medium text-slate-900">{log.response}</span>
+                            </p>
+                          )}
+                        </div>
+                        <div className="shrink-0 text-right text-[10px] font-medium text-slate-400">
+                          <p>{log.timestamp}</p>
+                          {log.connectedNumber && (
+                            <p className="mt-1 font-mono text-slate-500">Connected: {log.connectedNumber}</p>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  );
-                })}
+                  ))
+                )}
                 <div ref={logsEndRef} />
               </div>
             </div>
 
-          </div>
+            <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-4">
+              <div>
+                <h3 className="font-display text-base font-bold text-slate-900 flex items-center gap-2">
+                  <Send className="h-4.5 w-4.5 text-indigo-500" />
+                  <span>Incoming Message Simulator</span>
+                </h3>
+                <p className="text-xs text-slate-500">Use this to simulate a customer phone number and watch the logged reply decision.</p>
+              </div>
 
+              <form onSubmit={handleSendSimultedMsg} className="space-y-3">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Customer phone number</label>
+                  <input
+                    type="text"
+                    value={simCustomerPhone}
+                    onChange={(e) => setSimCustomerPhone(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2 text-xs outline-none focus:border-indigo-500 bg-slate-50 focus:bg-white"
+                    id="sim-customer-phone-input"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Customer message</label>
+                  <textarea
+                    rows={4}
+                    value={simCustomerMsg}
+                    onChange={(e) => setSimCustomerMsg(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2 text-xs outline-none focus:border-indigo-500 bg-slate-50 focus:bg-white"
+                    id="sim-customer-message-input"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={chatSubmitting}
+                  className="rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                >
+                  {chatSubmitting ? "Sending..." : "Send Simulated Message"}
+                </button>
+              </form>
+
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 max-h-[24rem] overflow-y-auto space-y-3">
+                {simulatorChat.map((entry, index) => (
+                  <div
+                    key={`${entry.timestamp}-${index}`}
+                    className={`rounded-2xl p-3 text-xs leading-6 ${
+                      entry.sender === 'user'
+                        ? 'ml-8 bg-indigo-600 text-white'
+                        : entry.sender === 'bot'
+                          ? 'mr-8 bg-white text-slate-800 border border-slate-200'
+                          : 'bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    <p className="mb-1 text-[10px] font-bold uppercase tracking-wider opacity-70">{entry.sender}</p>
+                    <p className="whitespace-pre-wrap">{entry.text}</p>
+                    <p className="mt-2 text-[10px] opacity-60">{entry.timestamp}</p>
+                  </div>
+                ))}
+                <div ref={chatEndRef} />
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

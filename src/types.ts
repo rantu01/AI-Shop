@@ -24,6 +24,8 @@ export interface WhatsAppLog {
   message: string;
   response?: string;
   type: 'incoming' | 'outgoing' | 'system';
+  action?: string;
+  connectedNumber?: string;
 }
 
 export interface WhatsAppSession {
