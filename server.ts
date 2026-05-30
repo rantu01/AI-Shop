@@ -17,14 +17,12 @@ const { DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore
 
 const DEFAULT_APP_URL = "https://ai-shop.rantumondal.codes/";
 
-// Configure Cloudinary
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dyhhdl1hy",
   api_key: process.env.CLOUDINARY_API_KEY || "973768443269143",
   api_secret: process.env.CLOUDINARY_API_SECRET || "einkSknfjpcE65pMk5sLUik61Zw"
 });
 
-// Lazy load Stripe
 let stripeInstance: Stripe | null = null;
 function getStripeInstance() {
   if (!stripeInstance) {
@@ -52,33 +50,29 @@ let whatsappReconnectTimer: NodeJS.Timeout | null = null;
 let whatsappBridgeVersion = 0;
 let whatsappBotSettings = {
   sessionId: "default",
-  geminiReplyLimit: 4
+  geminiReplyLimit: 1
 };
 
 type ConversationState = {
   geminiRepliesUsed: number;
   lastCategorySlug?: string;
   lastCategoryName?: string;
+  catalogSession?: {
+    mode: "all" | "search" | "category";
+    page: number;
+    resultIds: string[];
+    query?: string;
+    categoryId?: string;
+    categoryName?: string;
+  };
 };
 
 type WhatsAppReplyMode = "gemini" | "catalog" | "sku" | "categories";
 
 const whatsappConversations = new Map<string, ConversationState>();
 
-function normalizeCustomerNumber(value: string) {
-  return String(value || "").replace(/[^\d+]/g, "").trim() || String(value || "").trim();
-}
-
-function normalizeLookupText(value: string) {
-  return String(value || "").trim().toLowerCase();
-}
-
-function compactNumber(value: string) {
-  return String(value || "").replace(/[^\d]/g, "");
-}
-
 function getConversationState(customerNumber: string): ConversationState {
-  const key = normalizeCustomerNumber(customerNumber);
+  const key = String(customerNumber || "").trim();
   const existing = whatsappConversations.get(key);
   if (existing) {
     return existing;
@@ -89,8 +83,12 @@ function getConversationState(customerNumber: string): ConversationState {
   return created;
 }
 
-function resetConversationState(customerNumber: string) {
-  whatsappConversations.delete(normalizeCustomerNumber(customerNumber));
+function normalizeCustomerNumber(value: string) {
+  return String(value || "").replace(/[^\d+]/g, "").trim() || String(value || "").trim();
+}
+
+function compactNumber(value: string) {
+  return String(value || "").replace(/[^\d]/g, "");
 }
 
 function pushWhatsAppLog(entry: WhatsAppLog) {
@@ -98,164 +96,6 @@ function pushWhatsAppLog(entry: WhatsAppLog) {
   if (whatsappLogs.length > 250) {
     whatsappLogs = whatsappLogs.slice(-250);
   }
-}
-
-function getConnectedWhatsAppNumber() {
-  const socketNumber = whatsappSocket?.user?.id ? whatsappSocket.user.id.split(":")[0] : "";
-  return sessionPhoneNumberFromStore() || socketNumber || "";
-}
-
-async function sessionPhoneNumberFromStore() {
-  const currentSession = await dbAPI.getWhatsAppSession("default");
-  return currentSession?.phoneNumber || "";
-}
-
-function buildCategorySummary(categories: any[], products: any[]) {
-  const grouped = categories.map((category) => {
-    const count = products.filter((product) => product.category === category._id).length;
-    return `${category.name}${count ? ` (${count})` : ""}`;
-  });
-
-  return grouped.length > 0 ? grouped.join("\n") : "No categories available yet.";
-}
-
-function buildCategoryListReply(categories: any[], products: any[], websiteUrl: string) {
-  const lines = categories.length > 0
-    ? categories.map((category, index) => `${index + 1}. ${category.name} - reply with this category name to see products`).join("\n")
-    : ["No categories found in the catalog right now."].join("\n");
-
-  return [
-    "Here are the available product categories:",
-    lines,
-    "",
-    `You can also browse the store here: ${websiteUrl}`
-  ].join("\n");
-}
-
-function buildCategoryProductsReply(category: any, categoryProducts: any[], websiteUrl: string) {
-  const productLines = categoryProducts.length > 0
-    ? categoryProducts.map((product, index) => `${index + 1}. ${product.name} - SKU: ${product.sku}`).join("\n")
-    : "No products are currently assigned to this category.";
-
-  return [
-    `Products in ${category.name}:`,
-    productLines,
-    "",
-    "Reply with the SKU to get full product details.",
-    `Store link: ${websiteUrl}`
-  ].join("\n");
-}
-
-function buildProductDetailsReply(product: any, websiteUrl: string) {
-  return [
-    `Product details for SKU ${product.sku}:`,
-    `Name: ${product.name}`,
-    `Price: $${product.price}`,
-    `Stock: ${product.stock} units`,
-    `Description: ${product.description}`,
-    `Status: ${product.stock > 0 ? "In stock" : "Out of stock"}`,
-    "",
-    `Browse more products: ${websiteUrl}`
-  ].join("\n");
-}
-
-function findMatchingCategory(categories: any[], messageText: string) {
-  const normalized = normalizeLookupText(messageText);
-  return categories.find((category) => {
-    const name = normalizeLookupText(category.name);
-    const slug = normalizeLookupText(category.slug);
-    return normalized === name || normalized.includes(name) || normalized === slug || normalized.includes(slug);
-  }) || null;
-}
-
-function findMatchingSku(products: any[], messageText: string) {
-  const normalized = String(messageText || "").toUpperCase();
-  return products.find((product) => {
-    const sku = String(product.sku || "").toUpperCase();
-    const skuRegex = new RegExp(`\\b${sku.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
-    return skuRegex.test(normalized) || normalized.includes(sku);
-  }) || null;
-}
-
-async function getBotCatalogReply(incomingText: string, websiteUrl: string, customerNumber: string) {
-  const products = await dbAPI.getProducts();
-  const categories = await dbAPI.getCategories();
-  const conversation = getConversationState(customerNumber);
-  const normalized = normalizeLookupText(incomingText);
-
-  const matchedSkuProduct = findMatchingSku(products, incomingText);
-  if (matchedSkuProduct) {
-    conversation.lastCategorySlug = matchedSkuProduct.category;
-    const category = categories.find((item) => item._id === matchedSkuProduct.category) || null;
-    conversation.lastCategoryName = category?.name;
-    return {
-      reply: buildProductDetailsReply(matchedSkuProduct, websiteUrl),
-      mode: "sku" as WhatsAppReplyMode,
-      productFound: true,
-      matchedSku: matchedSkuProduct.sku,
-      recognizedCode: matchedSkuProduct.sku
-    };
-  }
-
-  const matchedCategory = findMatchingCategory(categories, incomingText);
-  const asksForCategories = /\b(category|categories|available categories|what do you sell|product categories|show categories|all products|product details|list products)\b/i.test(normalized);
-  const asksForProductDetails = /\b(product details|details|show products|available products|catalog|inventory)\b/i.test(normalized);
-
-  if (matchedCategory) {
-    const categoryProducts = products.filter((product) => product.category === matchedCategory._id);
-    conversation.lastCategorySlug = matchedCategory._id;
-    conversation.lastCategoryName = matchedCategory.name;
-    return {
-      reply: buildCategoryProductsReply(matchedCategory, categoryProducts, websiteUrl),
-      mode: "catalog" as WhatsAppReplyMode,
-      productFound: categoryProducts.length > 0,
-      selectedCategory: matchedCategory.name
-    };
-  }
-
-  if (asksForCategories || asksForProductDetails || conversation.geminiRepliesUsed >= whatsappBotSettings.geminiReplyLimit) {
-    return {
-      reply: [
-        buildCategoryListReply(categories, products, websiteUrl),
-        "",
-        "If you already know the product code, send the SKU and I’ll pull the detailed product record."
-      ].join("\n"),
-      mode: "categories" as WhatsAppReplyMode,
-      productFound: false
-    };
-  }
-
-  return null;
-}
-
-async function buildWhatsAppReply(incomingText: string, customerNumber: string, websiteUrl: string, source: string) {
-  const conversation = getConversationState(customerNumber);
-  const catalogReply = await getBotCatalogReply(incomingText, websiteUrl, customerNumber);
-
-  if (catalogReply) {
-    if (catalogReply.mode !== "gemini") {
-      conversation.geminiRepliesUsed = conversation.geminiRepliesUsed;
-    }
-
-    if (catalogReply.mode === "sku") {
-      conversation.geminiRepliesUsed = 0;
-    }
-
-    return {
-      ...catalogReply,
-      action: catalogReply.mode === "sku" ? "sku-details" : catalogReply.mode === "catalog" ? "category-products" : "category-list"
-    };
-  }
-
-  const aiResponse = await getBotResponse(incomingText, websiteUrl);
-  conversation.geminiRepliesUsed += 1;
-
-  return {
-    ...aiResponse,
-    mode: "gemini" as WhatsAppReplyMode,
-    action: aiResponse.productFound ? "gemini-product-reply" : "gemini-reply",
-    source
-  };
 }
 
 function isWhatsAppSocketActive() {
@@ -295,6 +135,345 @@ async function resetWhatsAppBridgeState() {
     qrCode: "",
     phoneNumber: ""
   });
+}
+function isNextPaginationIntent(messageText: string) {
+  return /^(next|more|show more|next 10)$/i.test(String(messageText || "").trim());
+}
+
+function isProductListIntent(messageText: string) {
+  return /(what products are available|show all products|product list|what do you sell|available items|catalog|products|explore|browse all|see all products|type explore)/i.test(String(messageText || ""));
+}
+
+function isProductSearchIntent(messageText: string) {
+  return /(do you have|is .* available|sell|do you sell|available\?|product search|search)/i.test(String(messageText || ""));
+}
+
+function isCategoryIntent(messageText: string) {
+  return /(category|categories|product details|show categories|available categories)/i.test(String(messageText || ""));
+}
+
+function normalizeText(value: string) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function searchWordsFromMessage(messageText: string) {
+  const cleaned = normalizeText(messageText)
+    .replace(/^(do you have|is there|is|are there|are you selling|sell|do you sell|show me|show|find|search for|available items?|available products?|available categories?|what products are available|what do you sell|what categories do you have|product details|catalog|products|category|categories)\s*/i, "")
+    .trim();
+
+  return cleaned || normalizeText(messageText);
+}
+
+function sortProductsForDisplay(products: any[]) {
+  return [...products].sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")));
+}
+
+function paginateProducts(products: any[], page: number, pageSize: number) {
+  const safePage = Math.max(1, page || 1);
+  const startIndex = (safePage - 1) * pageSize;
+  return {
+    page: safePage,
+    pageSize,
+    total: products.length,
+    items: products.slice(startIndex, startIndex + pageSize)
+  };
+}
+
+function buildProductListReply(products: any[], page: number, pageSize: number) {
+  const paginated = paginateProducts(sortProductsForDisplay(products), page, pageSize);
+  const startNumber = (paginated.page - 1) * paginated.pageSize + 1;
+  const lines = paginated.items.length > 0
+    ? paginated.items.map((product, index) => `${startNumber + index}. ${product.name}\nSKU: ${product.sku}`).join("\n")
+    : "No products found.";
+  const header = paginated.total > 0
+    ? `Available Products (${startNumber}-${startNumber + paginated.items.length - 1} of ${paginated.total})`
+    : "Available Products";
+
+  return {
+    reply: [header, "", lines].concat(paginated.total > paginated.page * paginated.pageSize ? ["Type NEXT to see more products."] : []).join("\n\n"),
+    nextPage: paginated.page + 1,
+    hasMore: paginated.total > paginated.page * paginated.pageSize,
+    pageSize: paginated.pageSize,
+    total: paginated.total,
+    productIds: paginated.items.map((product) => product._id),
+    items: paginated.items
+  };
+}
+
+function buildCategoryListReply(categories: any[], websiteUrl: string) {
+  const lines = categories.length > 0
+    ? categories.map((category, index) => `${index + 1}. ${category.name}`).join("\n")
+    : "No categories found in the catalog right now.";
+
+  return [
+    "হ্যালো! আমাদের ** সেরা সওদা **  ওয়েবসাইটে আপনাকে স্বাগতম। পণ্য খুঁজতে নিচের যেকোনো একটি ভাবে মেসেজ করুন:",
+    "",
+    "Available product categories:",
+    lines,
+    "",
+    "*কীভাবে লিখবেন:*",
+      "BM-2408 এর দাম কত?",
+      "BM-2408স্টকে আছে কি?",
+      "Show me Shera Sawda Exclusive products",
+      "I want to explore products",
+    "",
+    "type *explore* to see all products.",
+    "",
+    `You can browse more here: ${websiteUrl}`
+  ].join("\n");
+}
+
+function buildCategoryProductsReply(category: any, categoryProducts: any[], websiteUrl: string) {
+  const lines = categoryProducts.length > 0
+    ? categoryProducts.map((product, index) => `${index + 1}. ${product.name}\nSKU: ${product.sku}`).join("\n")
+    : "No products are currently assigned to this category.";
+
+  return [
+    `Products in ${category.name}:`,
+    lines,
+    "",
+    "Please send the SKU to view full product details.",
+    `Store link: ${websiteUrl}`
+  ].join("\n");
+}
+
+function buildProductDetailsReply(product: any, categoryName: string, relatedProducts: any[], websiteUrl: string) {
+  const relatedLines = relatedProducts.length > 0
+    ? relatedProducts.map((item, index) => `${index + 1}. ${item.name}\nSKU: ${item.sku}`).join("\n")
+    : "No related products found.";
+
+  return [
+    `Product Name: ${product.name}`,
+    `SKU: ${product.sku}`,
+    `Category: ${categoryName || "Uncategorized"}`,
+    `Price: $${product.price}`,
+    `Description: ${product.description}`,
+    `Stock Status: ${product.stock > 0 ? `In stock (${product.stock} available)` : "Out of stock"}`,
+    "",
+    "You may also like:",
+    relatedLines,
+    "",
+    `Browse more products: ${websiteUrl}`,
+    "",
+    "type *explore* to see all products."
+  ].join("\n");
+}
+
+function findMatchingCategory(categories: any[], messageText: string) {
+  const normalized = normalizeText(messageText);
+  return categories.find((category) => {
+    const name = normalizeText(category.name);
+    const slug = normalizeText(category.slug);
+    return normalized === name || normalized.includes(name) || normalized === slug || normalized.includes(slug);
+  }) || null;
+}
+
+function findMatchingSku(products: any[], messageText: string) {
+  const normalized = String(messageText || "").toUpperCase();
+  return products.find((product) => {
+    const sku = String(product.sku || "").toUpperCase();
+    const skuRegex = new RegExp(`\\b${sku.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    return skuRegex.test(normalized) || normalized.includes(sku);
+  }) || null;
+}
+
+function searchProductsByQuery(products: any[], categories: any[], query: string) {
+  const normalized = normalizeText(query);
+  const tokens = searchWordsFromMessage(query)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1);
+
+  const matches = products.filter((product) => {
+    const category = categories.find((item) => item._id === product.category);
+    const haystack = normalizeText([
+      product.name,
+      product.sku,
+      product.description,
+      category?.name,
+      category?.slug
+    ].filter(Boolean).join(" "));
+
+    if (!normalized) {
+      return false;
+    }
+
+    return normalized.includes(haystack) || haystack.includes(normalized) || tokens.some((token) => haystack.includes(token));
+  });
+
+  return sortProductsForDisplay(matches);
+}
+
+function buildRelatedProducts(product: any, products: any[], limit: number = 5) {
+  const sameCategory = products.filter((item) => item._id !== product._id && item.category === product.category);
+  const fallback = products.filter((item) => item._id !== product._id && !sameCategory.some((same) => same._id === item._id));
+  return [...sameCategory, ...fallback].slice(0, limit);
+}
+
+function clearCatalogSession(conversation: ConversationState) {
+  delete conversation.catalogSession;
+}
+
+async function getBotCatalogReply(incomingText: string, websiteUrl: string, customerNumber: string) {
+  const products = await dbAPI.getProducts();
+  const categories = await dbAPI.getCategories();
+  const conversation = getConversationState(customerNumber);
+  const normalized = normalizeText(incomingText);
+  const nextIntent = isNextPaginationIntent(incomingText);
+  const listIntent = isProductListIntent(incomingText);
+  const categoryIntent = isCategoryIntent(incomingText);
+  const skuProduct = findMatchingSku(products, incomingText);
+
+  if (skuProduct) {
+    const category = categories.find((item) => item._id === skuProduct.category) || null;
+    const relatedProducts = buildRelatedProducts(skuProduct, products);
+    conversation.lastCategorySlug = skuProduct.category;
+    conversation.lastCategoryName = category?.name;
+    clearCatalogSession(conversation);
+    return {
+      reply: buildProductDetailsReply(skuProduct, category?.name || "Uncategorized", relatedProducts, websiteUrl),
+      mode: "sku" as WhatsAppReplyMode,
+      productFound: true,
+      matchedSku: skuProduct.sku,
+      recognizedCode: skuProduct.sku,
+      relatedProducts: relatedProducts.map((item) => ({ name: item.name, sku: item.sku }))
+    };
+  }
+
+  if (nextIntent) {
+    const session = conversation.catalogSession;
+    const catalogProducts = session?.resultIds?.length
+      ? products.filter((product) => session.resultIds.includes(product._id))
+      : sortProductsForDisplay(products);
+    const nextPage = (session?.page || 1) + 1;
+    const pagination = buildProductListReply(catalogProducts, nextPage, 10);
+
+    conversation.catalogSession = {
+      mode: session?.mode || "all",
+      page: nextPage,
+      resultIds: session?.resultIds?.length ? session.resultIds : products.map((product) => product._id),
+      query: session?.query,
+      categoryId: session?.categoryId,
+      categoryName: session?.categoryName
+    };
+
+    if (pagination.items.length === 0) {
+      return {
+        reply: "You have reached the end of the catalog.",
+        mode: "catalog" as WhatsAppReplyMode,
+        productFound: false
+      };
+    }
+
+    return {
+      reply: `${pagination.reply}${pagination.hasMore ? "\n\nType NEXT to see more products." : "\n\nAll products have been shown."}`,
+      mode: "catalog" as WhatsAppReplyMode,
+      productFound: pagination.items.length > 0,
+      page: nextPage
+    };
+  }
+
+  if (listIntent || (conversation.catalogSession?.mode === "all" && !normalized)) {
+    const pagination = buildProductListReply(products, 1, 10);
+    conversation.catalogSession = {
+      mode: "all",
+      page: 1,
+      resultIds: sortProductsForDisplay(products).map((product) => product._id)
+    };
+    return {
+      reply: `${pagination.reply}${pagination.hasMore ? "\n\nType NEXT to see more products." : "\n\nAll products have been shown."}`,
+      mode: "catalog" as WhatsAppReplyMode,
+      productFound: pagination.items.length > 0,
+      page: 1
+    };
+  }
+
+  if (categoryIntent) {
+    return {
+      reply: buildCategoryListReply(categories, websiteUrl),
+      mode: "categories" as WhatsAppReplyMode,
+      productFound: false
+    };
+  }
+
+  if (isProductSearchIntent(incomingText)) {
+    const query = searchWordsFromMessage(incomingText);
+    const matches = searchProductsByQuery(products, categories, query);
+
+    if (matches.length === 0) {
+      return {
+        reply: [
+          `No matching products were found for "${query}".`,
+          "Try one of these next:",
+          "- type explore to see all products",
+          "- type categories to see product categories",
+          "- send a product name, SKU, or code",
+          "- ask: do you have [product name]?"
+        ].join("\n"),
+        mode: "categories" as WhatsAppReplyMode,
+        productFound: false
+      };
+    }
+
+    const preview = matches.slice(0, 10);
+    conversation.catalogSession = {
+      mode: "search",
+      page: 1,
+      resultIds: matches.map((product) => product._id),
+      query
+    };
+
+    return {
+      reply: [
+        "Found Products:",
+        "",
+        ...preview.flatMap((product, index) => [`${index + 1}. ${product.name}`, `SKU: ${product.sku}`, ""]),
+        "Please send the SKU to view full product details."
+      ].join("\n").trim(),
+      mode: "catalog" as WhatsAppReplyMode,
+      productFound: true
+    };
+  }
+
+  if (conversation.geminiRepliesUsed >= whatsappBotSettings.geminiReplyLimit) {
+    return {
+      reply: buildCategoryListReply(categories, websiteUrl),
+      mode: "categories" as WhatsAppReplyMode,
+      productFound: false
+    };
+  }
+
+  return null;
+}
+
+async function buildWhatsAppReply(incomingText: string, customerNumber: string, websiteUrl: string, source: string) {
+  const conversation = getConversationState(customerNumber);
+  const catalogReply = await getBotCatalogReply(incomingText, websiteUrl, customerNumber);
+
+  if (catalogReply) {
+    if (catalogReply.mode === "sku") {
+      conversation.geminiRepliesUsed = 0;
+    }
+
+    return {
+      ...catalogReply,
+      action: catalogReply.mode === "sku" ? "sku-details" : catalogReply.mode === "catalog" ? "catalog-reply" : "category-list"
+    };
+  }
+
+  const aiResponse = await getBotResponse(incomingText, websiteUrl);
+  conversation.geminiRepliesUsed += 1;
+
+  return {
+    ...aiResponse,
+    mode: "gemini" as WhatsAppReplyMode,
+    action: aiResponse.productFound ? "gemini-product-reply" : "gemini-reply",
+    source
+  };
 }
 
 async function ensureWhatsAppAuthDir() {
@@ -526,8 +705,8 @@ async function startWhatsAppBridge() {
             timestamp: new Date().toISOString(),
             from: "AI Bot (Seller)",
             message: "কি জানতে চান? কোন product নেবেন সেটার SKU বলুন।",
-            type: "outgoing"
-            ,action: "error-fallback"
+            type: "outgoing",
+            action: "error-fallback"
           });
         }
       });
@@ -711,8 +890,8 @@ async function startServer() {
 
   // Base API Endpoints
   app.get("/api/health", (req, res) => {
-    res.json({ 
-      status: "ok", 
+    res.json({
+      status: "ok",
       time: new Date().toISOString(),
       db: getDBStatus()
     });
@@ -725,7 +904,7 @@ async function startServer() {
       if (!image) {
         return res.status(400).json({ error: "Missing 'image' parameter in body." });
       }
-      
+
       const uploadResponse = await cloudinary.uploader.upload(image, {
         folder: "storebot_media"
       });
@@ -921,8 +1100,8 @@ async function startServer() {
         }
         const requestedQty = Number(item.quantity) || 1;
         if (prod.stock < requestedQty) {
-          return res.status(400).json({ 
-            error: `Sorry, only ${prod.stock} items left in stock` 
+          return res.status(400).json({
+            error: `Sorry, only ${prod.stock} items left in stock`
           });
         }
       }
